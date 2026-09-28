@@ -14,6 +14,7 @@ from shared.schemas.core import (
     ShiftType,
 )
 
+from src.config import config
 from src.services.assignment_service import AssignmentService
 from src.services.base_service import BaseService
 from src.services.link_shift_service import LinkShiftService
@@ -32,15 +33,30 @@ class ShiftService(BaseService):
         self.assignment_service = assignment_service
         self.link_shift_service = link_shift_service
 
+    @staticmethod
+    def validate_shift_duration(shift: Shift) -> None:
+        """Validate that the shift duration is positive and within the
+        allowed maximum shift duration.
+        If end_time is at or before start_time, auto-correct to 1h after start_time."""
+        if shift.end_time <= shift.start_time:
+            shift.end_time = shift.start_time + timedelta(hours=1)
+        if (shift.end_time - shift.start_time) > timedelta(
+            days=config.max_shift_duration_days
+        ):
+            raise ValueError(
+                f"Shift duration must be at most {config.max_shift_duration_days} days"
+            )
+
     def create_shift(self, shift: Shift) -> Tuple[Shift, List[Attribute]]:
         if shift.rest_type == ShiftRestType.OFF:
             raise ValueError("Cannot create the default rest shift")
         if shift.leave_type != ShiftLeaveType.NONE:
             raise ValueError("Cannot create a leave shift")
+        self.validate_shift_duration(shift)
         shift_created = self.collection.shift_db.create_shift(shift)
         dim_types = (
             [DimensionType.SHIFT]
-            if shift.shift_type in [ShiftType.NORMAL, ShiftType.DUTY]
+            if shift.shift_type in [ShiftType.NORMAL, ShiftType.DUTY, ShiftType.ON_CALL]
             else [DimensionType.REST_SHIFT]
         )
         d_bool = (
@@ -458,6 +474,7 @@ class ShiftService(BaseService):
 
     def update_shift(self, shift_new: Shift) -> Tuple[Shift, LSChange]:
         shift_old = self._validate_shift_update(shift_new.id)
+        self.validate_shift_duration(shift_new)
         self._handle_acronym_update(shift_new, shift_old)
         shift_saved = self.collection.shift_db.update_shift(shift_new)
         ls_change = self._handle_link_shift_updates(shift_saved, shift_old)

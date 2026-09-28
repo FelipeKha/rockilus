@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import BaseModel
 from shared.database.database_collections import DatabaseCollections
@@ -42,6 +42,24 @@ from shared.schemas.core import (
 
 from src.services.base_service import BaseService
 
+# Data types that can be exported for a team, in solver_data.json key order.
+EXPORTABLE_DATA_TYPES: tuple[str, ...] = (
+    "specialties",
+    "workers",
+    "shifts",
+    "link_shifts",
+    "dimensions",
+    "dim_entries",
+    "attributes",
+    "shift_demand_templates",
+    "shift_demands",
+    "constraints",
+    "requests",
+    "schedules",
+)
+
+_ENTITY_KEY_SET: frozenset[str] = frozenset(EXPORTABLE_DATA_TYPES)
+
 
 class ScenarioLoadResponse(BaseModel):
     """Response model for scenario loading."""
@@ -65,40 +83,71 @@ class SolverTestScenariosService(BaseService):
     def __init__(
         self,
         collection: DatabaseCollections,
-        test_data_file: Path | None = None,
+        test_data_dir: Path | None = None,
     ):
         super().__init__(collection)
-        if test_data_file is None:
-            test_data_file = (
-                Path(__file__).resolve().parents[2]
-                / "tests"
-                / "test_data"
-                / "solver_data.json"
+        if test_data_dir is None:
+            test_data_dir = Path(__file__).resolve().parents[2] / "tests" / "test_data"
+        if not test_data_dir.exists() or not test_data_dir.is_dir():
+            raise FileNotFoundError(f"Test data directory not found: {test_data_dir}")
+        self.test_data_dir = test_data_dir
+        self._scenario_index: Dict[str, Tuple[Path, Optional[str]]] | None = None
+
+    def _discover_scenarios(self) -> Dict[str, Tuple[Path, Optional[str]]]:
+        """Scan test_data_dir for *.json files and build a scenario index.
+
+        Returns a mapping of scenario_name -> (file_path, key_in_file_or_None).
+
+        Heuristic for each JSON file:
+          - If top-level keys overlap with known entity types
+            (EXPORTABLE_DATA_TYPES), the file is "flat": its filename stem
+            is the scenario name and the whole dict is the data.
+          - Otherwise the file is "wrapped": each top-level key is a
+            scenario name and its value is the data dict.
+        """
+        if self._scenario_index is not None:
+            return self._scenario_index
+
+        index: Dict[str, Tuple[Path, Optional[str]]] = {}
+        json_files = sorted(self.test_data_dir.glob("*.json"))
+
+        if not json_files:
+            raise ValueError(
+                f"No JSON files found in test data directory: {self.test_data_dir}"
             )
-        if not test_data_file.exists():
-            raise FileNotFoundError(f"Solver data file not found: {test_data_file}")
-        self.test_data_file_path = test_data_file
+
+        for file_path in json_files:
+            try:
+                with file_path.open("r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception as exc:
+                log_info(f"Skipping unparseable JSON file {file_path}: {exc}")
+                continue
+
+            if not isinstance(data, dict):
+                continue
+
+            top_level_keys = set(data.keys())
+            if top_level_keys & _ENTITY_KEY_SET:
+                # Flat file: filename (without .json) is the scenario name
+                scenario_name = file_path.stem
+                index[scenario_name] = (file_path, None)
+            else:
+                # Wrapped file: each top-level key is a scenario name
+                for key in data:
+                    if isinstance(data[key], dict):
+                        index[key] = (file_path, key)
+
+        if not index:
+            raise ValueError(
+                f"No scenarios discovered in test data directory: {self.test_data_dir}"
+            )
+
+        self._scenario_index = index
+        return index
 
     def get_scenario_names(self) -> List[str]:
-        """Get list of all available scenario names from the JSON fixture.
-        Raises:
-            FileNotFoundError: if the fixture file does not exist.
-            ValueError: if the fixture cannot be parsed or has no keys.
-        """
-        try:
-            with self.test_data_file_path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except Exception as exc:
-            raise ValueError(
-                f"Failed to parse solver data file: {self.test_data_file_path}"
-            ) from exc
-
-        if not isinstance(data, dict) or len(data) == 0:
-            raise ValueError(
-                f"Solver data file {self.test_data_file_path} contains no scenarios"
-            )
-
-        return list(data.keys())
+        return sorted(self._discover_scenarios().keys())
 
     def create_scenario(self, scenario_name: str, team_id: str) -> ScenarioLoadResponse:
         """Create a full scenario in the database for the given name.
@@ -153,19 +202,113 @@ class SolverTestScenariosService(BaseService):
         }
 
     def load_scenario_data_from_json(self, scenario_name: str) -> Dict[str, Any]:
-        """Load raw scenario data from the local JSON fixture.
-
-        Returns the raw dict stored under the given scenario name.
-        """
-        with self.test_data_file_path.open("r", encoding="utf-8") as fh:
-            data = json.load(fh)
-
-        if scenario_name not in data:
+        """Load raw scenario data for the given scenario name from disk."""
+        index = self._discover_scenarios()
+        if scenario_name not in index:
             raise ValueError(
-                f"Scenario '{scenario_name}' not found in solver_data.json"
+                f"Scenario '{scenario_name}' not found in test data directory"
             )
 
-        return data[scenario_name]
+        file_path, key = index[scenario_name]
+        with file_path.open("r", encoding="utf-8") as fh:
+            data = json.load(fh)
+
+        if key is not None:
+            return data[key]
+        return data
+
+    def export_team_data(
+        self,
+        team_id: str,
+        data_types: List[str] | None = None,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        """Export a team's data as raw Mongo-shaped dicts.
+
+        Inverse of create_scenario: the returned dict matches the shape of a
+        scenario in solver_data.json, so it can be pasted into the fixture and
+        re-loaded via scenario_data_dict_to_core / save_scenario_to_db.
+        """
+        if data_types is not None:
+            unknown = set(data_types) - set(EXPORTABLE_DATA_TYPES)
+            if unknown:
+                raise ValueError(f"Unknown data types: {sorted(unknown)}")
+            selected = [dt for dt in EXPORTABLE_DATA_TYPES if dt in set(data_types)]
+        else:
+            selected = list(EXPORTABLE_DATA_TYPES)
+
+        # Some entity types are fetched via other collections even when they
+        # are not exported themselves: attributes are owned by workers/shifts,
+        # requests belong to workers, dim_entries belong to dimensions.
+        workers: List[Worker] = []
+        if {"workers", "attributes", "requests"} & set(selected):
+            workers = self.collection.worker_db.get_workers(team_id)
+        shifts: List[Shift] = []
+        if {"shifts", "attributes"} & set(selected):
+            shifts = self.collection.shift_db.get_shifts(team_id)
+        dimensions: List[Dimension] = []
+        if {"dimensions", "dim_entries"} & set(selected):
+            dimensions = self.collection.dimension_db.get_dimensions(team_id)
+
+        exporters: Dict[str, Any] = {
+            "specialties": lambda: [
+                SpecialtySchema.from_core(s)
+                for s in self.collection.specialty_db.get_specialties_by_team_id(
+                    team_id
+                )
+            ],
+            "workers": lambda: [WorkerSchema.from_core(w) for w in workers],
+            "shifts": lambda: [ShiftSchema.from_core(s) for s in shifts],
+            "link_shifts": lambda: [
+                LinkShiftSchema.from_core(ls)
+                for ls in self.collection.link_shift_db.get_link_shifts(team_id)
+            ],
+            "dimensions": lambda: [DimensionSchema.from_core(d) for d in dimensions],
+            "dim_entries": lambda: [
+                DimEntrySchema.from_core(de)
+                for de in self.collection.dim_entry_db.get_dim_entries_by_dim_ids(
+                    [d.id for d in dimensions]
+                )
+            ],
+            "attributes": lambda: [
+                AttributeSchema.from_core(a)
+                for a in self.collection.attribute_db.get_attributes_by_owner_ids(
+                    [s.id for s in shifts] + [w.id for w in workers]
+                )
+            ],
+            "shift_demand_templates": lambda: [
+                ShiftDemandTemplateSchema.from_core(sdt)
+                for sdt in self.collection.shift_demand_template_db.get_templates_by_team_id(  # noqa: E501
+                    team_id
+                )
+            ],
+            "shift_demands": lambda: [
+                ShiftDemandNewSchema.from_core(sd)
+                for sd in self.collection.shift_demand_new_db.get_shift_demands_by_team_id(  # noqa: E501
+                    team_id
+                )
+            ],
+            "constraints": lambda: [
+                ConstraintBuildSchema.from_core(c)
+                for c in self.collection.constraint_build_db.get_constraint_builds(
+                    team_id
+                )
+            ],
+            "requests": lambda: [
+                RequestSchema.from_core(r)
+                for r in self.collection.request_db.get_requests(
+                    [w.id for w in workers]
+                )
+            ],
+            "schedules": lambda: [
+                ScheduleSchema.from_core(s)
+                for s in self.collection.schedule_db.get_schedules(team_id)
+            ],
+        }
+
+        return {
+            data_type: [schema.to_mongo() for schema in exporters[data_type]()]
+            for data_type in selected
+        }
 
     @staticmethod
     def scenario_data_dict_to_core(

@@ -466,16 +466,21 @@ export default function WorkerTab({
             >
               {t('team')}
             </span>
-            <div style={{ display: 'flex', gap: '8px' }}>
+            <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
               <TableAddButton
                 text={t('worker')}
                 handleClick={handleAddWorker}
                 tooltip={t('create_member_tooltip')}
+                dataTestId="add-worker-button"
               />
               <DimensionDialog
                 title={t('new_property')}
                 buttonContent={
-                  <TableAddButton text={t('property')} tooltip={t('create_property_tooltip')} />
+                  <TableAddButton
+                    text={t('property')}
+                    tooltip={t('create_property_tooltip')}
+                    dataTestId="add-property-button"
+                  />
                 }
                 content={
                   <NewDimensionForm
@@ -498,6 +503,7 @@ export default function WorkerTab({
           {/* Filter/Sort toolbar */}
           {showFilterToolbar && (
             <TableFilterBar
+              lng={lng}
               filters={tableState.filters}
               sort={tableState.sort}
               onRemoveFilter={removeFilter}

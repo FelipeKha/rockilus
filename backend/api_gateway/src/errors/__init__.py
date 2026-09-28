@@ -3,14 +3,17 @@ from .authn_errors.authn_errors import (
     AuthnEmailAlreadyExistsError,
     AuthnEmailChangeNotAllowedError,
     AuthnEmailNotFoundForUserError,
+    AuthnExpiredVerificationCodeError,
+    AuthnInvalidVerificationCodeError,
     AuthnPasswordChangeError,
     AuthnPasswordPolicyViolationError,
     AuthnUpdateEmailError,
+    AuthnUserNotConfirmedError,
     AuthnUserNotFoundError,
     AuthnWrongCredentialsError,
+    SecurityViolation,
 )
-from .authz_errors.authz_error_handlers import handle_permit_errors
-from .authz_errors.authz_errors import AuthzConnectionError
+from .copilot_errors.copilot_errors import CopilotDisabledError
 from .message_errors.message_error_handlers import handle_message_errors
 from .message_errors.message_errors import MessageTypeError
 from .routes_errors.routes_error_handlers import handle_routes_errors
@@ -25,17 +28,20 @@ __all__ = [
     "AuthnEmailAlreadyExistsError",
     "AuthnEmailChangeNotAllowedError",
     "AuthnEmailNotFoundForUserError",
+    "AuthnExpiredVerificationCodeError",
+    "AuthnInvalidVerificationCodeError",
     "AuthnPasswordChangeError",
     "AuthnPasswordPolicyViolationError",
     "AuthnUserNotFoundError",
+    "AuthnUserNotConfirmedError",
     "AuthnWrongCredentialsError",
     "AuthnUpdateEmailError",
-    "handle_permit_errors",
-    "AuthzConnectionError",
+    "SecurityViolation",
     "handle_message_errors",
     "MessageTypeError",
     "handle_routes_errors",
     "NotAuthorizedError",
     "PasswordsDoNotMatchError",
     "NoCampaignError",
+    "CopilotDisabledError",
 ]

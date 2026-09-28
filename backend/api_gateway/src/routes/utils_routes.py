@@ -17,21 +17,18 @@ from shared.database.reset_service import (
     DatabaseResetError,
     DatabaseResetService,
 )
-from shared.logger import log_info
 from shared.schemas.core import TeamMembership, TeamMembershipRole
 
 from src.config import config
 from src.dependencies import (
+    get_auth_service,
     get_db_collections,
     get_test_service,
     get_user_context,
 )
-from src.errors import NotAuthorizedError
-from src.integrations.authorization import (
-    authz_check,
-    authz_delete_all_instances_except_user,
-)
+from src.errors import AuthnWrongCredentialsError
 from src.security.user_context import UserContext
+from src.services.auth_service import AuthService
 from src.services.team_membership_service import TeamMembershipService
 from src.services.test_service import SolverTestScenariosService
 
@@ -145,11 +142,8 @@ async def reset_database_endpoint(
         # Perform the reset operation
         if request.collections is None:
             result = await reset_service.reset_all_collections()
-            await authz_delete_all_instances_except_user(PRESERVED_USER_ID)
         else:
             result = await reset_service.reset_specific_collections(request.collections)
-            if "users" in request.collections:
-                await authz_delete_all_instances_except_user(PRESERVED_USER_ID)
 
         # Restore preserved user in DB if it existed before reset
         if preserved_user is not None and (
@@ -253,19 +247,6 @@ async def load_test_scenario(
     test_service: SolverTestScenariosService = Depends(get_test_service),
 ) -> Dict:
     try:
-        if not await authz_check(
-            user_context.user_id, "create-worker", "team", request.team_id
-        ):
-            log_info(
-                f"Authorization denied for user {user_context.user_id} "
-                f"to create worker in team {request.team_id}"
-            )
-            raise NotAuthorizedError("You do not have permission to create a worker")
-        log_info(
-            f"Loading test scenario '{request.scenario_name}' "
-            f"for team '{request.team_id}'"
-        )
-
         # Get scenario data
         try:
             scenario = test_service.create_scenario(
@@ -448,5 +429,77 @@ async def add_team_member(
         logger.error(f"Failed to add team member: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to list scenarios: {str(e)}",
+            detail=f"Failed to add team member: {str(e)}",
+        ) from e
+
+
+class ConfirmCognitoUserRequest(BaseModel):
+    email: str
+
+
+class ConfirmCognitoUserResponse(BaseModel):
+    success: bool
+    message: str
+    email: str
+
+
+class ResetCognitoLocalResponse(BaseModel):
+    success: bool
+    message: str
+    users_deleted: int
+
+
+@router.post("/confirm-cognito-user", response_model=ConfirmCognitoUserResponse)
+async def confirm_cognito_user(
+    request: ConfirmCognitoUserRequest,
+    _: None = Depends(get_test_environment_only),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> ConfirmCognitoUserResponse:
+    try:
+        await auth_service.admin_confirm_user_in_cognito(request.email)
+        logger.info(f"Admin-confirmed Cognito user: {request.email}")
+        return ConfirmCognitoUserResponse(
+            success=True,
+            message=f"User {request.email} confirmed successfully",
+            email=request.email,
+        )
+    except HTTPException:
+        raise
+    except AuthnWrongCredentialsError:
+        # User is already confirmed — that's fine for test setup
+        logger.info(f"Cognito user {request.email} already confirmed")
+        return ConfirmCognitoUserResponse(
+            success=True,
+            message=f"User {request.email} already confirmed",
+            email=request.email,
+        )
+    except Exception as e:
+        logger.error(f"Failed to confirm Cognito user: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to confirm user: {str(e)}",
+        ) from e
+
+
+@router.post("/reset-cognito-local", response_model=ResetCognitoLocalResponse)
+async def reset_cognito_local(
+    _: None = Depends(get_test_environment_only),
+    auth_service: AuthService = Depends(get_auth_service),
+) -> ResetCognitoLocalResponse:
+    """Delete all users from the local Cognito instance. Test environments only."""
+    try:
+        count = await auth_service.reset_cognito_users()
+        logger.info(f"Reset cognito-local: deleted {count} users")
+        return ResetCognitoLocalResponse(
+            success=True,
+            message=f"Deleted {count} Cognito users",
+            users_deleted=count,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to reset cognito-local: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to reset cognito-local: {str(e)}",
         ) from e

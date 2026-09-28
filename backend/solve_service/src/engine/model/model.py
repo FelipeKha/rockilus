@@ -3,9 +3,6 @@
 # from google.protobuf import text_format  # type: ignore
 from google.protobuf import text_format  # type: ignore
 from ortools.sat.python import cp_model  # type: ignore
-
-# pylint: disable=no-name-in-module
-from ortools.sat.sat_parameters_pb2 import SatParameters  # type: ignore
 from shared.schemas.core import SolverParams, SolveStrategy
 
 from engine.model.add_constraint_factory import AddConstraintFactory
@@ -288,6 +285,9 @@ class Model:
         self.add_target_nb_duties_constraints(
             inputs.system_constraints.monthly_target_nb_duties
         )
+        self.add_target_nb_on_call_constraints(
+            inputs.system_constraints.monthly_target_nb_on_call
+        )
         self.add_special_days_constraints(
             inputs.system_constraints.special_days_target_nb_duties
         )
@@ -303,9 +303,19 @@ class Model:
                 constraint=inputs.system_constraints.max_week_day_nb_duties,
                 obj_category=ObjectiveCategory.MAX_WEEK_DAY_NB_DUTIES,
             )
+            self.add_max_weekly_nb_duties_constraints(
+                constraint=inputs.system_constraints.max_weekly_nb_on_call,
+                obj_category=ObjectiveCategory.MAX_WEEKLY_NB_ON_CALL,
+            )
             self.add_consecutive_duty_gap_constraints(
                 constraint=inputs.system_constraints.duty_consecutive_gap,
                 # obj_category=ObjectiveCategory.DUTY_CONSECUTIVE_GAP,
+            )
+            self.add_on_call_consecutive_gap_constraints(
+                constraint=inputs.system_constraints.on_call_consecutive_gap,
+            )
+            self.add_off_shift_penalty_constraints(
+                constraint=inputs.system_constraints.off_shift_penalty,
             )
         except Exception:
             # be defensive: if structure is missing or empty, skip
@@ -371,8 +381,17 @@ class Model:
     def no_interval_overlap(
         self, no_overlap_shift_intervals: list[list[tuple[str, str, str]]]
     ) -> None:
-        for w_assignments in no_overlap_shift_intervals:
-            self.model.AddNoOverlap([self.intervals[a] for a in w_assignments])
+        for group in no_overlap_shift_intervals:
+            interval_vars = [
+                self.intervals[a]
+                for a in group
+                if a
+                in self.intervals  # guard: history assignments have no interval var
+            ]
+            if len(interval_vars) < 2:
+                # AddNoOverlap with 0 or 1 intervals is a no-op; skip to keep the model proto lean.
+                continue
+            self.model.AddNoOverlap(interval_vars)
 
     def add_duty_recup_constraints(
         self,
@@ -645,6 +664,46 @@ class Model:
             self.obj.int_vars.append(max_excess)
             self.obj.int_coeffs.append(constraint.penalty)
 
+    def add_target_nb_on_call_constraints(
+        self, constraints: list[GroupsAssignmentsTargetConstraint]
+    ) -> None:
+        for constraint in constraints:
+            excesses = []
+            cstr_vars = []
+            for assignments, target in zip(constraint.assignments, constraint.targets):
+                constraint_vars = [self.variables[a] for a in assignments]
+                cstr_vars.extend(constraint_vars)
+                excess = self.model.NewIntVar(
+                    -target,
+                    len(constraint_vars)
+                    * Constants.NUM_HOURS_DAY
+                    * Constants.NUM_MINUTES_HOUR,
+                    "",
+                )
+                tolerance = round(target * constraint.tolerance)
+                self.model.AddMaxEquality(
+                    excess,
+                    [
+                        sum(v for v in constraint_vars) - target - tolerance,
+                        0,
+                    ],
+                )
+                excesses.append(excess)
+            var_name = build_var_name_groups_assignments(
+                cstr_vars=cstr_vars,
+                category=ObjectiveCategory.MONTHLY_TARGET_NB_ON_CALL,
+            )
+            max_excess = self.model.NewIntVar(
+                0,
+                len(constraint_vars)
+                * Constants.NUM_HOURS_DAY
+                * Constants.NUM_MINUTES_HOUR,
+                var_name,
+            )
+            self.model.AddMaxEquality(max_excess, excesses)
+            self.obj.int_vars.append(max_excess)
+            self.obj.int_coeffs.append(constraint.penalty)
+
     # pylint: disable=too-many-branches
     def add_max_weekly_nb_duties_constraints(
         self,
@@ -825,6 +884,72 @@ class Model:
             self.obj.bool_vars.append(excess)
             self.obj.bool_coeffs.append(penalty)
 
+    def add_on_call_consecutive_gap_constraints(
+        self,
+        constraint: tuple[
+            list[tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]],
+            int,
+        ],
+    ) -> None:
+        if not constraint:
+            return
+        pairs, penalty = constraint
+        if not pairs or penalty == 0:
+            return
+
+        for vars_d, vars_next in pairs:
+            model_vars_d = [self.variables[a] for a in vars_d if a in self.variables]
+            model_vars_next = [
+                self.variables[a] for a in vars_next if a in self.variables
+            ]
+            if not model_vars_d or not model_vars_next:
+                continue
+
+            has_on_call_d = self.model.NewBoolVar("")
+            self.model.AddMaxEquality(has_on_call_d, model_vars_d)
+
+            has_on_call_next = self.model.NewBoolVar("")
+            self.model.AddMaxEquality(has_on_call_next, model_vars_next)
+
+            excess = self.model.NewBoolVar("")
+            self.model.Add(has_on_call_d + has_on_call_next >= 2).OnlyEnforceIf(excess)
+            self.model.Add(has_on_call_d + has_on_call_next < 2).OnlyEnforceIf(
+                excess.Not()
+            )
+            self.obj.bool_vars.append(excess)
+            self.obj.bool_coeffs.append(penalty)
+
+    def add_off_shift_penalty_constraints(
+        self,
+        constraint: tuple[list[tuple[str, str, str]], int],
+    ) -> None:
+        """Add a soft penalty for each free OFF shift assignment.
+
+        Penalises OFF variables that are whitelisted by user constraints but not
+        hard-fixed to 0, discouraging the solver from assigning them when the
+        constraint antecedent does not fire.
+
+        Input: (vars_list, penalty) where vars_list contains (worker, date, shift)
+        tuples for free OFF shift variables and penalty is the per-assignment cost.
+        """
+        if not constraint:
+            return
+        vars_list, penalty = constraint
+        if not vars_list or penalty == 0:
+            return
+        for var in vars_list:
+            if var not in self.variables:
+                continue
+            var_name = build_var_name_generic(
+                objective_id=None,
+                cstr_vars=[self.variables[var]],
+                category=ObjectiveCategory.OFF_SHIFT_PENALTY,
+            )
+            named_var = self.model.NewBoolVar(var_name)
+            self.model.Add(named_var == self.variables[var])
+            self.obj.bool_vars.append(named_var)
+            self.obj.bool_coeffs.append(penalty)
+
     def add_worker_shift_filter_constraints(
         self,
         worker_shift_filters: tuple[list[tuple[str, str, str]], int],
@@ -884,8 +1009,8 @@ class Model:
             )
         )
 
-    def build_solver_params(self, params: SolverParams) -> SatParameters:
-        out = SatParameters()
+    def build_solver_params(self, params: SolverParams) -> cp_model.SatParameters:
+        out = cp_model.SatParameters()
 
         out.max_time_in_seconds = params.max_time_in_seconds
         out.num_search_workers = params.num_search_workers
@@ -898,8 +1023,15 @@ class Model:
             for subsolver in params.ignore_subsolvers:
                 out.ignore_subsolvers.append(subsolver)
         if params.restart_algorithms:
-            out.restart_algorithms.extend(params.restart_algorithms)
-        # out.restart_algorithms.extend(["LUBY_RESTART"])
+            # OR-Tools 9.15: repeated field expects integer enum values, not strings.
+            # Use sat_parameters_pb2 only as an enum registry (not for construction).
+            import ortools.sat.sat_parameters_pb2 as _pb2  # type: ignore  # noqa: PLC0415
+
+            for ra in params.restart_algorithms:
+                if isinstance(ra, str):
+                    out.restart_algorithms.append(getattr(_pb2.SatParameters, ra))
+                else:
+                    out.restart_algorithms.append(int(ra))
         out.restart_period = params.restart_period
         out.linearization_level = params.linearization_level
         out.cut_level = params.cut_level
@@ -1045,8 +1177,8 @@ class Model:
 
         self.solver.log_callback = log_callback
 
-        self.status = self.solver.Solve(  # type: ignore # [CHECK IF OK]
-            self.model, solution_callback
+        self.status = self.solver.solve(  # type: ignore # [CHECK IF OK]
+            model=self.model, solution_callback=solution_callback
         )
 
         # self.bt.total_end = time.time()
@@ -1077,7 +1209,7 @@ class Model:
         print(f"Branches:        {self.solver.NumBranches()}")
         print(f"Wall time:       {self.solver.WallTime()} s")
         print(f"Objective value: {self.solver.ObjectiveValue()}")
-        print(f"Status:          {self.solver.StatusName()}")
+        print(f"Status:          {self.solver.StatusName(self.status)}")
         print("\n")
 
     # def set_up_model(self, inputs: Inputs) -> None:

@@ -59,7 +59,7 @@ def build_templates(
     shifts_constraint = [
         s
         for s in shifts
-        if s.shift_type in [ShiftType.NORMAL, ShiftType.DUTY]
+        if s.shift_type in [ShiftType.NORMAL, ShiftType.DUTY, ShiftType.ON_CALL]
         or s.rest_type == ShiftRestType.OFF
     ]
     shift_options = build_options(
@@ -135,7 +135,14 @@ def build_options(
                 id_type=SWOIdTypes.DUTY,
                 is_bool_dim=True,
                 category_name="Duties",
-            )
+            ),
+            ShiftWorkerOption(
+                name="",
+                id="",
+                id_type=SWOIdTypes.ON_CALL,
+                is_bool_dim=True,
+                category_name="On-call",
+            ),
         ]
     for dimension in dimensions:
         dim_attributes = (

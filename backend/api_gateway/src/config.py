@@ -53,19 +53,9 @@ class AppConfig(BaseSettings):
         "global-bundle.pem",
         description="Path to DocumentDB CA bundle certificate",
     )
-    pdp_url: str = Field(..., description="Policy Decision Point URL")
-    pdp_api_key: str = Field(..., description="Policy Decision Point API key")
 
-    # Authorization retry configuration
-    authz_enable_retry: bool = Field(
-        True, description="Enable retry logic for authorization checks"
-    )
-    authz_max_retries: int = Field(
-        3, description="Maximum number of authorization retry attempts"
-    )
-    authz_initial_delay: float = Field(
-        0.5, description="Initial delay in seconds before first retry"
-    )
+    # Cerbos authorization
+    cerbos_host: str = Field("cerbos:3592", description="Cerbos gRPC host:port")
 
     uvicorn_reload: bool = Field(
         False,
@@ -96,6 +86,11 @@ class AppConfig(BaseSettings):
         None, description="AWS Cognito User Pool ID"
     )
     cognito_client_id: str | None = Field(None, description="AWS Cognito App Client ID")
+    cognito_endpoint_url: str | None = Field(
+        None,
+        description="Dedicated endpoint for Cognito (e.g., cognito-local). "
+        "Overrides endpoint_url for cognito-idp calls only.",
+    )
 
     # Development authentication fields
     dev_user_id: str = Field(
@@ -122,6 +117,19 @@ class AppConfig(BaseSettings):
         description="Lifetime of impersonation JWTs in seconds (default 1 h)",
     )
 
+    # Copilot action confirmation token configuration
+    copilot_action_jwt_secret: str = Field(
+        "dev-copilot-action-secret-change-in-production",
+        description="Dedicated HMAC secret used to sign copilot write-action "
+        + "confirmation tokens (set via COPILOT_ACTION_JWT_SECRET env var). "
+        + "Kept separate from the impersonation secret for independent rotation.",
+    )
+    copilot_action_token_ttl_seconds: int = Field(
+        300,
+        description="Lifetime of copilot action confirmation tokens in seconds "
+        + "(default 5 min); a confirmation dialog is acted on quickly)",
+    )
+
     # SQS Configuration - Queue URLs (managed by Terraform)
     sqs_solve_queue_url: str = Field(
         ...,
@@ -134,6 +142,88 @@ class AppConfig(BaseSettings):
     # App configuration
     max_schedule_duration_months: int = Field(
         3, description="Maximum schedule duration in months"
+    )
+    max_shift_duration_days: int = Field(
+        30, description="Maximum shift duration in days (end_time - start_time)"
+    )
+    cookie_domain: str | None = Field(
+        None,
+        description="Domain for auth cookies (e.g. .rockilus.com). "
+        "None in dev so cookies work on localhost.",
+    )
+    refresh_cookie_max_age: int = Field(
+        2_592_000,  # 30 days
+        description="Max-Age in seconds for the refresh-token cookie",
+    )
+
+    # Rate limits for auth endpoints — slowapi-compatible strings.
+    # Override via env vars (e.g. SIGNUP_RATE_LIMIT=100/hour) in development.
+    signup_rate_limit: str = Field(
+        "30/hour", description="Rate limit for POST /auth/signup"
+    )
+    signin_rate_limit: str = Field(
+        "10/minute", description="Rate limit for POST /auth/signin"
+    )
+    confirm_signup_rate_limit: str = Field(
+        "10/minute", description="Rate limit for POST /auth/confirm-signup"
+    )
+    forgot_password_rate_limit: str = Field(
+        "3/hour", description="Rate limit for POST /auth/forgot-password"
+    )
+    confirm_forgot_password_rate_limit: str = Field(
+        "5/minute", description="Rate limit for POST /auth/confirm-forgot-password"
+    )
+    change_email_rate_limit: str = Field(
+        "5/minute", description="Rate limit for POST /auth/change-email"
+    )
+    verify_email_rate_limit: str = Field(
+        "5/minute", description="Rate limit for POST /auth/verify-email"
+    )
+    resend_code_rate_limit: str = Field(
+        "3/15minutes", description="Rate limit for POST /auth/resend-code"
+    )
+    refresh_rate_limit: str = Field(
+        "30/minute", description="Rate limit for POST /auth/refresh"
+    )
+    signout_rate_limit: str = Field(
+        "20/minute", description="Rate limit for POST /auth/signout"
+    )
+
+    # AI Copilot configuration
+    ai_enabled: bool = Field(
+        False,
+        description="Global kill-switch for the AI copilot feature",
+    )
+    mcp_enabled: bool = Field(
+        False,
+        description="Global kill-switch for the MCP SSE endpoint",
+    )
+    ai_model: str = Field(
+        "gemini/gemini-2.5-flash",
+        description="LiteLLM model string; the provider is encoded in the prefix "
+        "(e.g. 'gemini/...', 'openrouter/...')",
+    )
+    gemini_api_key: str | None = Field(
+        None, description="API key for Gemini models (gemini/* model strings)"
+    )
+    openrouter_api_key: str | None = Field(
+        None, description="API key for OpenRouter models (openrouter/* model strings)"
+    )
+    mistral_api_key: str | None = Field(
+        None, description="API key for Mistral models (mistral/* model strings)"
+    )
+    ai_max_history_messages: int = Field(
+        20,
+        description="Maximum chat history messages to include in the copilot "
+        "prompt. Excess messages are dropped from the head (oldest first).",
+    )
+    ai_chat_rate_limit: str = Field(
+        "20/minute", description="Rate limit for POST /copilot/chat"
+    )
+    copilot_plan_execution_max_retries: int = Field(
+        2,
+        description="Maximum number of planner retries when plan steps fail due to "
+        "LLM argument errors (missing required fields, type mismatches).",
     )
 
     model_config = SettingsConfigDict(
@@ -276,7 +366,7 @@ def _validate_ca_content(content: bytes) -> bool:
             and "-----END CERTIFICATE-----" in content_str
             and len(content_str) > 1000  # Reasonable minimum size
         )
-    except (UnicodeDecodeError, ValueError):
+    except UnicodeDecodeError, ValueError:
         return False
 
 
@@ -286,7 +376,7 @@ def _validate_ca_bundle(ca_bundle_path: str) -> bool:
         with open(ca_bundle_path, "rb") as f:
             content = f.read()
         return _validate_ca_content(content)
-    except (OSError, IOError):
+    except OSError:
         return False
 
 
@@ -319,7 +409,7 @@ def download_documentdb_ca_bundle(
         if not os.path.exists(dir_path):
             try:
                 os.makedirs(dir_path, exist_ok=True)
-            except (OSError, PermissionError):
+            except OSError:
                 print(f"Cannot create directory {dir_path}, using temp")
                 ca_bundle_path = os.path.join(
                     tempfile.gettempdir(), "global-bundle.pem"
@@ -330,7 +420,7 @@ def download_documentdb_ca_bundle(
         ssl_context.check_hostname = True
         ssl_context.verify_mode = ssl.CERT_REQUIRED
 
-        with urllib.request.urlopen(ca_bundle_url, context=ssl_context) as response:
+        with urllib.request.urlopen(ca_bundle_url, context=ssl_context) as response:  # nosec B310  # nosemgrep
             ca_content = response.read()
 
         # Validate certificate content before writing

@@ -36,7 +36,7 @@ export function useCreateTeam() {
         throw new Error('Authentication still loading - please wait');
       }
 
-      if (!isAuthenticated || !user?.id_token) {
+      if (!isAuthenticated) {
         throw new Error('User not authenticated - please sign in');
       }
 
@@ -90,7 +90,7 @@ export function useGetTeamById() {
         throw new Error('Authentication still loading - please wait');
       }
 
-      if (!isAuthenticated || !user?.id_token) {
+      if (!isAuthenticated) {
         throw new Error('User not authenticated - please sign in');
       }
 
@@ -131,7 +131,7 @@ export function useGetUserTeamsWithMemberships() {
       throw new Error('Authentication still loading - please wait');
     }
 
-    if (!isAuthenticated || !user?.id_token) {
+    if (!isAuthenticated) {
       throw new Error('User not authenticated - please sign in');
     }
 
@@ -172,7 +172,7 @@ export function useGetTeamUsersWithMemberships() {
         throw new Error('Authentication still loading - please wait');
       }
 
-      if (!isAuthenticated || !user?.id_token) {
+      if (!isAuthenticated) {
         throw new Error('User not authenticated - please sign in');
       }
 
@@ -206,7 +206,7 @@ export function useUpdateTeam() {
         throw new Error('Authentication still loading - please wait');
       }
 
-      if (!isAuthenticated || !user?.id_token) {
+      if (!isAuthenticated) {
         throw new Error('User not authenticated - please sign in');
       }
 
@@ -220,7 +220,7 @@ export function useUpdateTeam() {
         throw error;
       }
     },
-    [apiClient, isAuthenticated, loading, user],
+    [apiClient, isAuthenticated, loading],
   );
 
   return updateTeam;
@@ -240,7 +240,7 @@ export function useLeaveTeam() {
         throw new Error('Authentication still loading - please wait');
       }
 
-      if (!isAuthenticated || !user?.id_token) {
+      if (!isAuthenticated) {
         throw new Error('User not authenticated - please sign in');
       }
 
@@ -254,7 +254,7 @@ export function useLeaveTeam() {
         throw error;
       }
     },
-    [apiClient, isAuthenticated, loading, user],
+    [apiClient, isAuthenticated, loading],
   );
 
   return leaveTeam;
@@ -274,7 +274,7 @@ export function useRemoveUserFromTeam() {
         throw new Error('Authentication still loading - please wait');
       }
 
-      if (!isAuthenticated || !user?.id_token) {
+      if (!isAuthenticated) {
         throw new Error('User not authenticated - please sign in');
       }
 
@@ -288,8 +288,41 @@ export function useRemoveUserFromTeam() {
         throw error;
       }
     },
-    [apiClient, isAuthenticated, loading, user],
+    [apiClient, isAuthenticated, loading],
   );
 
   return removeUserFromTeam;
+}
+
+/**
+ * Hook for updating a team membership role
+ */
+export function useUpdateTeamMembershipRole() {
+  const apiClient = useApiClient();
+  const { user, isAuthenticated, loading } = useAuth();
+
+  const updateTeamMembershipRole = useCallback(
+    async (teamId: string, userId: string, role: string): Promise<{ role: string }> => {
+      if (loading) {
+        throw new Error('Authentication still loading - please wait');
+      }
+
+      if (!isAuthenticated) {
+        throw new Error('User not authenticated - please sign in');
+      }
+
+      try {
+        return await TeamApi.updateTeamMembershipRole(apiClient, teamId, userId, role);
+      } catch (error) {
+        console.error('Failed to update team membership role:', {
+          error: error instanceof Error ? error.message : 'Unknown error',
+          timestamp: new Date().toISOString(),
+        });
+        throw error;
+      }
+    },
+    [apiClient, isAuthenticated, loading],
+  );
+
+  return updateTeamMembershipRole;
 }

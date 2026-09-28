@@ -57,17 +57,7 @@ resource "aws_api_gateway_rest_api" "main" {
   endpoint_configuration {
     types = ["REGIONAL"]
   }
-}
-
-# Cognito Authorizer
-resource "aws_api_gateway_authorizer" "cognito" {
-  name        = "${var.project_name}-cognito-authorizer-${var.environment}"
-  rest_api_id = aws_api_gateway_rest_api.main.id
-  #   authorizer_uri         = "arn:aws:apigateway:${var.aws_region}:cognito-idp:path/userpools/${var.cognito_user_pool_id}/authorizers"
-  authorizer_credentials = null
-  type                   = "COGNITO_USER_POOLS"
-  provider_arns          = ["arn:aws:cognito-idp:${var.aws_region}:${local.effective_account_id}:userpool/${var.cognito_user_pool_id}"]
-  identity_source        = "method.request.header.Authorization"
+  binary_media_types = ["multipart/form-data"]
 }
 
 # VPC Link
@@ -90,8 +80,7 @@ resource "aws_api_gateway_method" "any_proxy" {
   rest_api_id   = aws_api_gateway_rest_api.main.id
   resource_id   = aws_api_gateway_resource.proxy.id
   http_method   = "ANY"
-  authorization = "COGNITO_USER_POOLS"
-  authorizer_id = aws_api_gateway_authorizer.cognito.id
+  authorization = "NONE"
   request_parameters = {
     "method.request.path.proxy"                   = true
     "method.request.header.X-Forwarded-For"       = false
@@ -147,10 +136,6 @@ resource "aws_api_gateway_integration" "any_proxy" {
     "integration.request.header.X-Forwarded-Proto" = "method.request.header.X-Forwarded-Proto"
     # Service authentication
     "integration.request.header.X-API-Key" = "'${random_password.backend_api_key.result}'"
-    # User context from Cognito
-    "integration.request.header.X-User-Sub"    = "context.authorizer.claims.sub"
-    "integration.request.header.X-User-Email"  = "context.authorizer.claims.email"
-    "integration.request.header.X-User-Groups" = "context.authorizer.claims['cognito:groups']"
     # Request metadata
     "integration.request.header.X-Request-ID" = "context.requestId"
     "integration.request.header.X-Source-IP"  = "context.identity.sourceIp"
@@ -488,15 +473,6 @@ resource "aws_api_gateway_integration_response" "internal_onboard_500" {
   depends_on = [aws_api_gateway_integration.internal_onboard]
 }
 
-# Data source for account id
-# data "aws_caller_identity" "current" {}
-
-data "aws_caller_identity" "current" {}
-
-locals {
-  effective_account_id = data.aws_caller_identity.current.account_id
-}
-
 # Custom Domain Name (conditional)
 resource "aws_api_gateway_domain_name" "custom" {
   domain_name = var.custom_domain_name
@@ -551,7 +527,6 @@ resource "aws_route53_record" "api_domain" {
 resource "aws_api_gateway_deployment" "main" {
   depends_on = [
     aws_api_gateway_rest_api.main,
-    aws_api_gateway_authorizer.cognito,
     aws_api_gateway_method.any_proxy,
     aws_api_gateway_integration.any_proxy,
     aws_api_gateway_method_response.any_proxy_200,

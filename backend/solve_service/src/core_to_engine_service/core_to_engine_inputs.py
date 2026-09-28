@@ -2,12 +2,14 @@ from shared.constraint_parser import (
     build_dim_to_attr_value_to_owner,
 )
 from shared.schemas.core import (
+    Constraints,
     EngineInputsAugmented,
     RequestStatus,
     Shift,
     ShiftDemandNew,
     ShiftRestType,
     ShiftType,
+    TeamGenerationSettings,
 )
 from shared.schemas.core.solve_task_status import SolveScope, SolveScopeType
 
@@ -31,6 +33,7 @@ from core_to_engine_service.build_engine_shift_demands import (
 )
 from core_to_engine_service.build_engine_variables import (
     build_engine_variables,
+    build_no_overlap_shift_intervals,
 )
 from core_to_engine_service.build_engine_work_loads import (
     build_engine_work_loads,
@@ -55,8 +58,13 @@ from core_to_engine_service.calculate_worker_nb_duties import (
     build_consecutive_duty_gap_vars,
     build_max_week_day_nb_duties_vars,
     build_max_weekly_nb_duties_vars,
+    build_max_weekly_nb_on_call_vars,
     build_nb_duties_constraints,
+    build_nb_on_call_constraints,
+    build_on_call_consecutive_gap_vars,
+    calculate_auto_gap,
     calculate_worker_nb_duties,
+    calculate_worker_nb_on_calls,
 )
 from core_to_engine_service.calculate_worker_special_days import (
     build_duty_special_days_constraints,
@@ -79,7 +87,10 @@ from engine import ModelSetup as ModelSetupEngine
 def core_to_engine_inputs(
     engine_inputs: EngineInputsAugmented,
     solve_scope: SolveScope | None = None,
+    team_settings: TeamGenerationSettings | None = None,
 ) -> tuple[InputsEngine, ProcessingCache]:
+    _team_settings = team_settings or TeamGenerationSettings.default("")
+    slot_periods = engine_inputs.team.slot_periods if engine_inputs.team else None
     # Workers
     workers_not_deleted = [w for w in engine_inputs.workers if not w.deleted]
     worker_not_deleted_ids = [w.id for w in engine_inputs.workers if not w.deleted]
@@ -111,6 +122,9 @@ def core_to_engine_inputs(
     ]
     shift_duties = [s for s in engine_inputs.shifts if s.shift_type == ShiftType.DUTY]
     shift_duties_not_deleted = [s for s in shift_duties if not s.deleted]
+    shift_on_call_not_deleted = [
+        s for s in shifts_not_deleted if s.shift_type == ShiftType.ON_CALL
+    ]
     shift_id_to_duration_dict = _build_shift_id_to_duration_dict(engine_inputs.shifts)
     dim_to_attr_value_to_shift = build_dim_to_attr_value_to_owner(
         engine_inputs.shifts,
@@ -143,12 +157,14 @@ def core_to_engine_inputs(
         dates_campaign=dates_campaign,
     )
 
-    variables = build_engine_variables(
+    variables, hist_bleed_vars = build_engine_variables(
         workers=engine_inputs.workers,
         worker_ids_to_worker_dates=worker_ids_to_worker_dates,
         shifts=engine_inputs.shifts,
         shifts_not_deleted=shifts_not_deleted,
         shift_id_to_duration_dict=shift_id_to_duration_dict,
+        as_hist=engine_inputs.as_hist,
+        campaign_start=engine_inputs.schedule.start_date,
     )
 
     # Scope pre-processing (Phase 4)
@@ -161,6 +177,7 @@ def core_to_engine_inputs(
         _scope_ctx = preprocess_scope(
             scope=solve_scope,
             workers_not_deleted=workers_not_deleted,
+            dates_campaign=dates_campaign,
             shifts_not_deleted=shifts_not_deleted,
             demands=engine_inputs.shift_demands,
             var_model=variables.assignments,
@@ -218,6 +235,15 @@ def core_to_engine_inputs(
         periods=periods_monthly,
     )
 
+    w_to_nb_on_calls = calculate_worker_nb_on_calls(
+        schedule=engine_inputs.schedule,
+        workers=workers_not_deleted,
+        shifts=shifts_not_deleted,
+        requests=engine_inputs.requests_leave,
+        shift_demands=engine_inputs.shift_demands,
+        periods=periods_monthly,
+    )
+
     # Max weekly nb duties variables (weeks x workers x assignments lists)
     max_weekly_nb_duties_vars = (
         build_max_weekly_nb_duties_vars(
@@ -241,6 +267,31 @@ def core_to_engine_inputs(
         else []
     )
 
+    max_weekly_nb_on_call_vars = (
+        build_max_weekly_nb_on_call_vars(
+            workers_not_deleted,
+            shift_on_call_not_deleted,
+            periods_weekly,
+            ws_to_dates,
+        )
+        if engine_inputs.model_config.system_constraints.max_weekly_nb_on_call
+        else []
+    )
+
+    _gap_enabled = _team_settings.duty_consecutive_gap_mode != "off"
+    # _gap_days is either a scalar int ("set" mode, user-defined) or a dict
+    # mapping worker_id -> gap in days ("auto" mode, calculated per worker).
+    # build_consecutive_duty_gap_vars handles both types, so no further
+    # branching is needed at the call site below.
+    _gap_days: int | dict[str, int] = (
+        _team_settings.duty_consecutive_gap_days
+        if _team_settings.duty_consecutive_gap_mode == "set"
+        else calculate_auto_gap(
+            workers_not_deleted,
+            w_to_nb_duties,
+            periods_monthly,
+        )
+    )
     duty_consecutive_gap_vars = (
         build_consecutive_duty_gap_vars(
             workers_not_deleted,
@@ -248,11 +299,53 @@ def core_to_engine_inputs(
             dates_campaign,
             dates_hist,
             ws_to_dates,
-            engine_inputs.model_config.system_constraints.duty_consecutive_gap_min_days,
+            _gap_days,
         )
         if engine_inputs.model_config.system_constraints.duty_consecutive_gap
+        and _gap_enabled
         else []
     )
+
+    on_call_consecutive_gap_vars = (
+        build_on_call_consecutive_gap_vars(
+            workers_not_deleted,
+            shift_on_call_not_deleted,
+            dates_campaign,
+            dates_hist,
+            ws_to_dates,
+            _gap_days,
+        )
+        if engine_inputs.model_config.system_constraints.on_call_consecutive_gap
+        and _gap_enabled
+        else []
+    )
+
+    # Constraints — built before fixed values so the OFF-shift whitelist
+    # extracted from parsed constraints can be passed to core_to_engine_fixed_values.
+    constraints = build_engine_constraints(
+        cbs_augmented=engine_inputs.cbs_augmented,
+        schedule=engine_inputs.schedule,
+        workers=engine_inputs.workers,
+        dim_to_attr_value_to_worker=dim_to_attr_value_to_worker,
+        dates_hist=dates_hist,
+        dates_campaign=dates_campaign,
+        periods_weekly=periods_weekly,
+        periods_monthly=periods_monthly,
+        periods_yearly=periods_yearly,
+        worker_ids_to_worker_dates=worker_ids_to_worker_dates,
+        shifts=engine_inputs.shifts,
+        dim_to_attr_value_to_shift=dim_to_attr_value_to_shift,
+        penalties=engine_inputs.penalties,
+    )
+
+    # Build whitelist of OFF-shift variables referenced in parsed constraints
+    # so they are not pre-fixed to 0 (e.g. "if duty on saturday → off next monday").
+    off_shift_ids = {
+        s.id
+        for s in shifts_not_deleted
+        if s.shift_type == ShiftType.REST and s.rest_type == ShiftRestType.OFF
+    }
+    constraint_off_vars = _extract_constraint_off_vars(constraints, off_shift_ids)
 
     # Fixed assignments
     fixed_values = core_to_engine_fixed_values(
@@ -270,36 +363,33 @@ def core_to_engine_inputs(
         attributes=engine_inputs.attributes,
         var_model=variables.assignments,
         scope_ctx=_scope_ctx,
+        constraint_off_vars=constraint_off_vars,
     )
 
-    # Constraints:
-    constraints = build_engine_constraints(
-        engine_inputs.cbs_augmented,
-        engine_inputs.schedule,
-        engine_inputs.workers,
-        dim_to_attr_value_to_worker,
-        dates_hist,
-        dates_campaign,
-        periods_weekly,
-        periods_monthly,
-        periods_yearly,
-        worker_ids_to_worker_dates,
-        engine_inputs.shifts,
-        dim_to_attr_value_to_shift,
-        engine_inputs.penalties,
+    # Free OFF vars: whitelisted by constraints but not hard-fixed to 0.
+    # The solver can assign these freely; penalise them to discourage spurious
+    # OFF assignments when the constraint antecedent does not fire.
+    free_off_vars = (
+        [
+            var
+            for var in variables.assignments
+            if var[2] in off_shift_ids and var not in fixed_values
+        ]
+        if engine_inputs.model_config.system_constraints.off_shift_penalty
+        else []
     )
 
     inputs = InputsEngine(
         ModelSetupEngine(
             variables=variables,
-            no_overlap_shift_intervals=[
-                [
-                    (w_id, d.isoformat(), s_id)
-                    for d in worker_ids_to_worker_dates[w_id].dates_campaign
-                    for s_id in shift_not_deleted_ids
-                ]
-                for w_id in worker_not_deleted_ids
-            ],
+            no_overlap_shift_intervals=build_no_overlap_shift_intervals(
+                worker_ids_to_worker_dates=worker_ids_to_worker_dates,
+                shifts_not_deleted=shifts_not_deleted,
+                worker_not_deleted_ids=worker_not_deleted_ids,
+                multitasking_groups=engine_inputs.multitasking_groups,
+                shift_demands=engine_inputs.shift_demands,
+                hist_bleed_vars=hist_bleed_vars,
+            ),
             # fixed_values={},
             fixed_values=fixed_values,
             sol_hint=SolHint(
@@ -343,6 +433,11 @@ def core_to_engine_inputs(
                     w_to_work_times,
                     w_to_nb_duties,
                     engine_inputs.penalties,
+                    skip_work_time=(
+                        not _team_settings.duty_scope_work_time
+                        and solve_scope is not None
+                        and solve_scope.scope_type == SolveScopeType.DUTIES
+                    ),
                 )
                 if engine_inputs.model_config.configuration_constraints.work_loads
                 else None
@@ -396,9 +491,12 @@ def core_to_engine_inputs(
                     d.id: BoolSharedPolicy.SHIFT_TRUE_ONLY
                     for d in engine_inputs.dimensions
                 },
+                slot_periods=slot_periods,
             ),
         ),
         system_constraints=SystemConstraintInputs(
+            # Weekly target work time, can be deactivated when solving fo duties
+            # only in team settings
             # weekly_target_work_time=[],
             weekly_target_work_time=(
                 build_work_time_constraints(
@@ -413,8 +511,14 @@ def core_to_engine_inputs(
                     # fmt: on
                 )
                 if engine_inputs.model_config.system_constraints.weekly_target_work_time
+                and not (
+                    not _team_settings.duty_scope_work_time
+                    and solve_scope is not None
+                    and solve_scope.scope_type == SolveScopeType.DUTIES
+                )
                 else []
             ),
+            # Monthly target nb duties per worker
             # monthly_target_nb_duties=[],
             monthly_target_nb_duties=(
                 build_nb_duties_constraints(
@@ -432,6 +536,10 @@ def core_to_engine_inputs(
                 # fmt: on
                 else []
             ),
+            # Constraint to minimize the max number of duties per week across
+            # workers (ensure fairness across workers), and minimize the max
+            # number of duties per week for each worker (ensure even spreading
+            # of duties through time)
             # max_weekly_nb_duties: tuple (weeks x workers x assignments, penalty)
             # max_weekly_nb_duties=([], 0),
             max_weekly_nb_duties=(
@@ -443,6 +551,11 @@ def core_to_engine_inputs(
             max_week_day_nb_duties=(
                 max_week_day_nb_duties_vars,
                 engine_inputs.penalties.system_constraint.max_week_day_nb_duties,
+            ),
+            # max_weekly_nb_on_call: tuple (weeks x workers x assignments, penalty)
+            max_weekly_nb_on_call=(
+                max_weekly_nb_on_call_vars,
+                engine_inputs.penalties.system_constraint.max_weekly_nb_on_call,
             ),
             # special_days_target_nb_duties=[],
             special_days_target_nb_duties=(
@@ -469,6 +582,33 @@ def core_to_engine_inputs(
                 duty_consecutive_gap_vars,
                 engine_inputs.penalties.system_constraint.duty_consecutive_gap,
             ),
+            # off_shift_penalty: tuple (free OFF vars, penalty)
+            off_shift_penalty=(
+                free_off_vars,
+                engine_inputs.penalties.system_constraint.off_shift_penalty,
+            ),
+            # monthly_target_nb_on_call: list[GroupsAssignmentsTargetConstraint]
+            monthly_target_nb_on_call=(
+                build_nb_on_call_constraints(
+                    periods_monthly,
+                    w_to_nb_on_calls,
+                    ws_to_dates,
+                    shift_on_call_not_deleted,
+                    engine_inputs.penalties.system_constraint.monthly_target_nb_on_call,
+                    # fmt: off
+                    engine_inputs.model_config.system_constraints.mthly_target_nb_on_call_tolerance,
+                    # fmt: on
+                )
+                # fmt: off
+                if engine_inputs.model_config.system_constraints.monthly_target_nb_on_call
+                # fmt: on
+                else []
+            ),
+            # on_call_consecutive_gap: tuple (pairs of (day_d_vars, day_d+k_vars), penalty)
+            on_call_consecutive_gap=(
+                on_call_consecutive_gap_vars,
+                engine_inputs.penalties.system_constraint.on_call_consecutive_gap,
+            ),
         ),
         model_config=engine_inputs.model_config,
     )
@@ -491,6 +631,7 @@ def core_to_engine_inputs(
         w_to_nb_duties=w_to_nb_duties,
         shift_id_to_duration=shift_id_to_duration_dict,
         dim_to_attr_value_to_shift=dim_to_attr_value_to_shift,
+        w_to_nb_on_calls=w_to_nb_on_calls,
         scope_ctx=_scope_ctx,
     )
 
@@ -499,3 +640,54 @@ def _build_shift_id_to_duration_dict(shifts: list[Shift]) -> dict[str, int]:
     return {
         s.id: int((s.end_time - s.start_time).total_seconds() // 60 - 1) for s in shifts
     }
+
+
+def _extract_constraint_off_vars(
+    constraints: Constraints,
+    off_shift_ids: set[str],
+) -> set[tuple[str, str, str]]:
+    """Return the set of (worker_id, date_iso, shift_id) tuples that reference
+    an OFF shift in any parsed user constraint.
+
+    These variables must remain free (not pre-fixed to 0) so that constraints
+    such as "if duty on saturday → off next monday" can still be satisfied.
+
+    Variable shapes per constraint type:
+      - ConstraintSum / ConstraintSeq / ConstraintFai: List[List[Tuple]]
+      - ConstraintOrd: List[Tuple[Tuple, Tuple]]  (var_ref, var_rel pairs)
+      - ConstraintFil: List[Tuple]  (flat)
+    """
+    result: set[tuple[str, str, str]] = set()
+
+    # Sum, Seq, Fai: outer list of periods/groups, inner list of variable tuples
+    for c_sum in constraints.sum:
+        for group in c_sum.constraint_variables:
+            for var in group:
+                if var[2] in off_shift_ids:
+                    result.add(var)
+    for c_seq in constraints.seq:
+        for group in c_seq.constraint_variables:
+            for var in group:
+                if var[2] in off_shift_ids:
+                    result.add(var)
+    for c_fai in constraints.fai:
+        for group in c_fai.constraint_variables:
+            for var in group:
+                if var[2] in off_shift_ids:
+                    result.add(var)
+
+    # Ord: list of (var_ref, var_rel) pairs — extract both sides
+    for c_ord in constraints.ord:
+        for var_ref, var_rel in c_ord.constraint_variables:
+            if var_ref[2] in off_shift_ids:
+                result.add(var_ref)
+            if var_rel[2] in off_shift_ids:
+                result.add(var_rel)
+
+    # Fil: flat list of variable tuples
+    for c_fil in constraints.fil:
+        for var in c_fil.constraint_variables:
+            if var[2] in off_shift_ids:
+                result.add(var)
+
+    return result

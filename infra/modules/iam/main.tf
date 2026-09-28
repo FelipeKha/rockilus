@@ -61,12 +61,41 @@ resource "aws_iam_role_policy" "secrets_access_policy" {
           "secretsmanager:DescribeSecret"
         ]
         Resource = compact([
-          # permit_api_key_secret_arn and documentdb_secret_arn provided by caller
-          var.permit_api_key_secret_arn,
           var.documentdb_secret_arn,
           # optionally include impersonation JWT secret ARN when provided
           var.impersonation_jwt_secret_arn,
         ])
+      }
+    ]
+  })
+}
+
+# Add policy for Cognito Admin API access (server-side auth operations)
+resource "aws_iam_role_policy" "cognito_admin_auth_policy" {
+  name = "${var.project_name}-${var.environment}-cognito-admin-auth-policy"
+  role = aws_iam_role.ecs_task_execution_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "cognito-idp:AdminInitiateAuth",
+          "cognito-idp:GetTokensFromRefreshToken",
+          "cognito-idp:AdminGetUser",
+          "cognito-idp:AdminConfirmSignUp",
+          "cognito-idp:AdminDeleteUser",
+          "cognito-idp:ListUsers",
+          "cognito-idp:AdminUpdateUserAttributes",
+          "cognito-idp:AdminUserGlobalSignOut",
+          "cognito-idp:ForgotPassword",
+          "cognito-idp:ConfirmForgotPassword",
+          "cognito-idp:SignUp",
+          "cognito-idp:ConfirmSignUp",
+          "cognito-idp:ResendConfirmationCode"
+        ]
+        Resource = var.cognito_user_pool_arn != "" ? var.cognito_user_pool_arn : "*"
       }
     ]
   })

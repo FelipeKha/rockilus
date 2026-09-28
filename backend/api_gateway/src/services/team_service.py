@@ -1,20 +1,21 @@
-import time
 from datetime import datetime, timezone
-from typing import List
+from typing import Dict, List
 
 from shared.schemas.core import (
     MembershipForTeamWithMembership,
     Team,
+    TeamGenerationSettings,
     TeamMembership,
     TeamMembershipRole,
     TeamWithMembership,
     UserWithMembership,
 )
-
-from src.integrations.authorization import (
-    authz_role_assignment_get_user_team_ids,
-    authz_team_resource_instance_create,
+from shared.schemas.dto import (
+    AdminTeamRowDTO,
+    PaginatedTeamsResponse,
+    TeamGenerationSettingsDTO,
 )
+
 from src.services.base_service import BaseService
 from src.services.notification_builders import (
     user_left_team_event,
@@ -38,6 +39,134 @@ class TeamService(BaseService):
         self.team_membership_service = team_membership_service
         self.notification_service = notification_service
 
+    def get_all_teams_for_admin(
+        self,
+        search_name: str | None = None,
+        search_owner_name: str | None = None,
+        search_owner_email: str | None = None,
+        search_team_id: str | None = None,
+        search_owner_id: str | None = None,
+        page: int = 1,
+        page_size: int = 30,
+    ) -> PaginatedTeamsResponse:
+        """Return a paginated, filterable list of all teams for the admin merge step.
+
+        Filtering is applied BEFORE pagination on the full dataset.  Owner info
+        (names, emails, IDs) is aggregated from team memberships with role=owner.
+        Owner-level filters (name, email, ID) work by first identifying matching
+        owner user IDs, then filtering teams by those IDs — this means a team
+        with multiple owners matches whenever *any* owner satisfies the filter.
+        """
+        skip = (page - 1) * page_size
+
+        # ── Build the team-level MongoDB query ──
+        team_query: Dict = {}
+        if search_name:
+            team_query["name"] = {"$regex": search_name, "$options": "i"}
+        if search_team_id:
+            team_query["_id"] = {"$regex": search_team_id, "$options": "i"}
+
+        # Owner filters require gathering candidate owner user IDs first.
+        owner_candidate_ids: set[str] | None = None
+        if search_owner_name or search_owner_email or search_owner_id:
+            user_query: Dict = {}
+            if search_owner_id:
+                user_query["_id"] = {
+                    "$regex": search_owner_id,
+                    "$options": "i",
+                }
+            if search_owner_name:
+                user_query["$or"] = [
+                    {
+                        "first_name": {
+                            "$regex": search_owner_name,
+                            "$options": "i",
+                        }
+                    },
+                    {
+                        "last_name": {
+                            "$regex": search_owner_name,
+                            "$options": "i",
+                        }
+                    },
+                ]
+            if search_owner_email:
+                user_query["email"] = {
+                    "$regex": search_owner_email,
+                    "$options": "i",
+                }
+
+            matching_users = self.collection.user_db.find_all(user_query)
+            owner_candidate_ids = {u.id for u in matching_users if u.id is not None}
+
+            # Find memberships for those users where role is owner
+            if owner_candidate_ids:
+                owner_memberships = self.collection.team_membership_db.find_all(
+                    {
+                        "user_id": {"$in": list(owner_candidate_ids)},
+                        "role": TeamMembershipRole.OWNER.value,
+                    }
+                )
+                owner_team_ids = {m.team_id for m in owner_memberships if m.team_id}
+                team_query["_id"] = {
+                    "$in": list(owner_team_ids),
+                    **(team_query.pop("_id") if "_id" in team_query else {}),
+                }
+            else:
+                # No matching users → empty result
+                return PaginatedTeamsResponse(
+                    items=[], total=0, page=page, page_size=page_size
+                )
+
+        # ── Fetch paginated teams ──
+        teams, total = self.collection.team_db.get_all_teams_paginated(
+            filters=team_query, skip=skip, limit=page_size
+        )
+
+        if not teams:
+            return PaginatedTeamsResponse(
+                items=[], total=total, page=page, page_size=page_size
+            )
+
+        # ── Gather all owners for these teams ──
+        team_ids = [t.id for t in teams]
+        all_memberships = self.collection.team_membership_db.find_all(
+            {
+                "team_id": {"$in": team_ids},
+                "role": TeamMembershipRole.OWNER.value,
+            }
+        )
+        all_owner_user_ids = list({m.user_id for m in all_memberships})
+        all_owner_users = (
+            self.collection.user_db.get_users_by_ids(all_owner_user_ids)
+            if all_owner_user_ids
+            else []
+        )
+        user_by_id = {u.id: u for u in all_owner_users}
+
+        # ── Build row DTOs ──
+        rows: List[AdminTeamRowDTO] = []
+        for team in teams:
+            team_memberships = [m for m in all_memberships if m.team_id == team.id]
+            owner_users = [
+                user_by_id[m.user_id]
+                for m in team_memberships
+                if m.user_id in user_by_id
+            ]
+            rows.append(
+                AdminTeamRowDTO(
+                    team_id=team.id,
+                    team_name=team.name,
+                    owner_ids=[u.id for u in owner_users],
+                    owner_names=[f"{u.first_name} {u.last_name}" for u in owner_users],
+                    owner_emails=[u.email for u in owner_users],
+                )
+            )
+
+        return PaginatedTeamsResponse(
+            items=rows, total=total, page=page, page_size=page_size
+        )
+
     async def create_team(self, team_name: str, owner_id: str) -> TeamWithMembership:
         new_team = Team(
             id="",
@@ -45,9 +174,9 @@ class TeamService(BaseService):
             created_by_user_id=owner_id,
             created_at=datetime.now(timezone.utc),
             use_solver=True,
+            show_stats=False,
         )
         new_team = self.collection.team_db.create_team(new_team)
-        await authz_team_resource_instance_create(new_team)
         membership = TeamMembership(
             id="",
             user_id=owner_id,
@@ -126,20 +255,16 @@ class TeamService(BaseService):
                 )
         return out
 
-    async def get_user_teams(self, user_id: str) -> List[Team]:
-        start_time_get_user_teams = time.time()
-        team_ids = await authz_role_assignment_get_user_team_ids(user_id, "leader")
-        end_time_get_user_teams = time.time()
-        start_time_get_teams_from_db = time.time()
-        teams = self.collection.team_db.get_teams_by_ids(team_ids)
-        end_time_get_teams_from_db = time.time()
-        total_time_get_user_teams = end_time_get_user_teams - start_time_get_user_teams
-        total_time_get_teams_from_db = (
-            end_time_get_teams_from_db - start_time_get_teams_from_db
+    def get_user_teams(self, user_id: str) -> List[Team]:
+        memberships = (
+            self.collection.team_membership_db.get_team_memberships_by_user_id(
+                user_id=user_id
+            )
         )
-        print(f"Total time to get user teams:    {total_time_get_user_teams}")
-        print(f"Total time to get teams from db: {total_time_get_teams_from_db}")
-        return teams
+        owner_team_ids = [
+            m.team_id for m in memberships if m.role == TeamMembershipRole.OWNER
+        ]
+        return self.collection.team_db.get_teams_by_ids(owner_team_ids)
 
     def update_team(self, team: Team) -> Team:
         existing_team = self.collection.team_db.get_team_by_id(team_id=team.id)
@@ -207,3 +332,27 @@ class TeamService(BaseService):
                     removed_user_id=user_id,
                 )
             )
+
+    def get_generation_settings(self, team_id: str) -> TeamGenerationSettings:
+        """Return team generation settings, using defaults if no document exists."""
+        settings = self.collection.team_generation_settings_db.get_by_team_id(team_id)
+        return (
+            settings
+            if settings is not None
+            else TeamGenerationSettings.default(team_id)
+        )
+
+    def update_generation_settings(
+        self, team_id: str, dto: TeamGenerationSettingsDTO
+    ) -> TeamGenerationSettings:
+        """Validate team exists then upsert generation settings."""
+        team = self.collection.team_db.get_team_by_id(team_id)
+        if team is None:
+            raise ValueError(f"Team {team_id} not found")
+        settings = TeamGenerationSettings(
+            team_id=team_id,
+            duty_scope_work_time=dto.duty_scope_work_time,
+            duty_consecutive_gap_mode=dto.duty_consecutive_gap_mode,
+            duty_consecutive_gap_days=dto.duty_consecutive_gap_days,
+        )
+        return self.collection.team_generation_settings_db.upsert(settings)

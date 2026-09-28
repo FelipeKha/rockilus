@@ -28,7 +28,7 @@ import {
   TeamInvitationStatus,
 } from '../../src/types/team-invitation';
 import { NotificationT, NotificationPreferencesT } from '../../src/types/notification';
-import { WorkerT, toWorkerT } from '../../src/types/worker';
+import { WorkerT, WeeklyPreferences, toWorkerT } from '../../src/types/worker';
 import { SpecialtyT } from '../../src/types/specialty';
 import {
   ShiftT,
@@ -132,6 +132,8 @@ export interface SolverScenarioResult {
   dim_entries: DimEntryT[];
   attributes: AttributeT[];
   shift_demands: ShiftDemandDTO[];
+  constraints: any[];
+  requests: any[];
   schedules: ScheduleT[];
 }
 
@@ -141,6 +143,15 @@ export class DatabaseTestUtils {
   constructor() {
     // Use centralized test configuration
     this.testApiClient = this.createTestApiClient();
+  }
+
+  /**
+   * Override the default test API client to act as a specific user.
+   * Useful in tests where subsequent helper calls should be performed
+   * using the team's owner/leader identity.
+   */
+  setTestApiClientUser(userId: string): void {
+    this.testApiClient = this.createAuthenticatedClientForUser(userId);
   }
 
   /**
@@ -394,6 +405,29 @@ export class DatabaseTestUtils {
   }
 
   /**
+   * Reset all Cognito users in the cognito-local instance
+   * Clears all users from the pool so subsequent test signups are clean
+   */
+  async resetCognitoLocal(): Promise<{ success: boolean; message: string; users_deleted: number }> {
+    const response = await fetch(`${testConfig.apiUrl}/test-utils/reset-cognito-local`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-Key': testConfig.devApiKey,
+      },
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+      throw new Error(
+        `Cognito reset failed (${response.status}): ${errorData.detail || response.statusText}`,
+      );
+    }
+
+    return response.json();
+  }
+
+  /**
    * Creates a test user via the onboard endpoint
    * This mimics the functionality of init-dev-user.sh script
    */
@@ -472,6 +506,20 @@ export class DatabaseTestUtils {
   }
 
   /**
+   * Change a team member's role (promote/demote)
+   * Uses the role update API endpoint with the team owner's credentials
+   */
+  async changeMemberRole(
+    teamId: string,
+    userId: string,
+    newRole: 'member' | 'owner',
+  ): Promise<{ message: string }> {
+    return this.makeAuthenticatedRequest('PUT', `/teams/${teamId}/users/${userId}/role`, {
+      role: newRole,
+    });
+  }
+
+  /**
    * Create an authenticated API client for a specific user
    * This allows tests to make requests as different users by switching the X-Dev-User-ID header
    */
@@ -533,6 +581,16 @@ export class DatabaseTestUtils {
       delete: <T>(endpoint: string, options?: RequestInit) =>
         makeAuthenticatedRequest<T>('DELETE', endpoint, undefined, options),
     };
+  }
+
+  /**
+   * Get a user's email by their Cognito sub (user ID).
+   * Uses the dev-mode header impersonation to call GET /users/me.
+   */
+  async getUserEmail(userId: string): Promise<string> {
+    const client = this.createAuthenticatedClientForUser(userId);
+    const user = await client.get<{ email: string }>('/users/me');
+    return user.email;
   }
 
   /**
@@ -643,18 +701,21 @@ export class DatabaseTestUtils {
   /**
    * Create a worker using the existing WorkerApi for consistent behavior
    */
-  async createWorker(workerData: {
-    teamId: string;
-    name: string;
-    acronym?: string;
-    employmentStartDate?: Date;
-    employmentEndDate?: Date | null;
-    weeklyHours?: number;
-    weeklyHoursDesired?: number;
-    dutiesPerMonth?: number;
-    annualLeave?: number;
-    specialtyIds?: string[];
-  }): Promise<WorkerT> {
+  async createWorker(
+    workerData: {
+      teamId: string;
+      name: string;
+      acronym?: string;
+      employmentStartDate?: Date;
+      employmentEndDate?: Date | null;
+      weeklyHours?: number;
+      weeklyHoursDesired?: number;
+      dutiesPerMonth?: number;
+      annualLeave?: number;
+      specialtyIds?: string[];
+    },
+    actingUserId?: string,
+  ): Promise<WorkerT> {
     try {
       // Create a WorkerT object with defaults
       const worker: WorkerT = {
@@ -679,8 +740,13 @@ export class DatabaseTestUtils {
         attributes: [],
       };
 
-      // Use the existing WorkerApi with our test client
-      const result: WorkerT = await WorkerApi.addWorker(this.testApiClient, worker);
+      // Use the existing WorkerApi with either the acting user (if provided)
+      // or the default test client.
+      const apiClient = actingUserId
+        ? this.createAuthenticatedClientForUser(actingUserId)
+        : this.testApiClient;
+
+      const result: WorkerT = await WorkerApi.addWorker(apiClient, worker);
 
       return result;
     } catch (error) {
@@ -708,6 +774,7 @@ export class DatabaseTestUtils {
       dutiesPerMonth?: number;
       annualLeave?: number;
       specialtyIds?: string[];
+      weeklyPreferences?: WeeklyPreferences;
     },
   ): Promise<{ workerId: string; name: string; teamId: string }> {
     try {
@@ -738,6 +805,10 @@ export class DatabaseTestUtils {
         dutiesPerMonth: updates.dutiesPerMonth ?? currentWorker.dutiesPerMonth,
         annualLeave: updates.annualLeave ?? currentWorker.annualLeave,
         specialtyIds: updates.specialtyIds ?? currentWorker.specialtyIds,
+        weeklyPreferences:
+          updates.weeklyPreferences !== undefined
+            ? updates.weeklyPreferences
+            : currentWorker.weeklyPreferences,
       };
 
       // Use the existing WorkerApi with our test client
@@ -827,20 +898,23 @@ export class DatabaseTestUtils {
   /**
    * Create a shift using the existing ShiftApi for consistent behavior
    */
-  async createShift(shiftData: {
-    teamId: string;
-    name: string;
-    startTime: dayjs.Dayjs;
-    endTime: dayjs.Dayjs;
-    shiftType: ShiftType;
-    staffing?: StaffingT[];
-    restType?: ShiftRestType;
-    leaveType?: ShiftLeaveType;
-    color?: string;
-    acronym?: string;
-    recuperationTime?: number;
-    recuperationDutyId?: string | null;
-  }): Promise<ShiftT> {
+  async createShift(
+    shiftData: {
+      teamId: string;
+      name: string;
+      startTime: dayjs.Dayjs;
+      endTime: dayjs.Dayjs;
+      shiftType: ShiftType;
+      staffing?: StaffingT[];
+      restType?: ShiftRestType;
+      leaveType?: ShiftLeaveType;
+      color?: string;
+      acronym?: string;
+      recuperationTime?: number;
+      recuperationDutyId?: string | null;
+    },
+    actingUserId?: string,
+  ): Promise<ShiftT> {
     try {
       const shift: ShiftT = {
         id: '', // Will be set by the API
@@ -858,11 +932,19 @@ export class DatabaseTestUtils {
         recuperationTime: shiftData.recuperationTime ?? 0,
         recuperationDutyId: shiftData.recuperationDutyId ?? null,
         deleted: false,
+        useCustomWorkTime: false,
+        customWorkTimeMinutes: 0,
         attributes: [],
       };
 
-      // Use the existing ShiftApi with our test client
-      const result: ShiftT = await ShiftApi.addShift(this.testApiClient, shift);
+      // Use the existing ShiftApi with either the acting user (if provided)
+      // or the default test client. This allows tests to create shifts as the
+      // team owner/leader when needed (so Cerbos authorization passes).
+      const apiClient = actingUserId
+        ? this.createAuthenticatedClientForUser(actingUserId)
+        : this.testApiClient;
+
+      const result: ShiftT = await ShiftApi.addShift(apiClient, shift);
 
       return result;
     } catch (error) {
@@ -1964,6 +2046,8 @@ export class DatabaseTestUtils {
         dim_entries: any[];
         attributes: any[];
         shift_demands: any[];
+        constraints: any[];
+        requests: any[];
         schedules: any[];
       }>('/test-utils/scenarios/load', {
         scenario_name: scenarioName,
@@ -1981,6 +2065,8 @@ export class DatabaseTestUtils {
         dim_entries: result.dim_entries,
         attributes: result.attributes.map(toAttributeT),
         shift_demands: result.shift_demands,
+        constraints: result.constraints,
+        requests: result.requests,
         schedules: result.schedules.map(toScheduleT),
       };
     } catch (error) {
@@ -1999,9 +2085,23 @@ export class DatabaseTestUtils {
    */
   async listSolverScenarios(): Promise<string[]> {
     try {
-      // The route returns a simple array of scenario names
-      const result = await this.testApiClient.get<string[]>('/test-utils/scenarios');
+      const response = await fetch(`${testConfig.apiUrl}/test-utils/scenarios`, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Dev-User-ID': testConfig.devUserId,
+          'X-API-Key': testConfig.devApiKey,
+        },
+      });
 
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+        throw new Error(
+          `Failed to list solver scenarios (${response.status}): ${errorData.detail || response.statusText}`,
+        );
+      }
+
+      const result: string[] = await response.json();
       console.log(`✅ Found ${result.length} available scenarios`);
       return result;
     } catch (error) {

@@ -49,6 +49,7 @@ src/shared/database/repositories/constraint_build.py
 src/shared/database/repositories/coverage.py
 src/shared/database/repositories/dim_entry.py
 src/shared/database/repositories/dimension.py
+src/shared/database/repositories/import_record.py
 src/shared/database/repositories/link_shift.py
 src/shared/database/repositories/model_output.py
 src/shared/database/repositories/multitasking.py
@@ -68,6 +69,7 @@ src/shared/database/repositories/specialty.py
 src/shared/database/repositories/stats_header.py
 src/shared/database/repositories/swap.py
 src/shared/database/repositories/team.py
+src/shared/database/repositories/team_generation_settings.py
 src/shared/database/repositories/team_invitation.py
 src/shared/database/repositories/team_membership.py
 src/shared/database/repositories/user.py
@@ -82,6 +84,7 @@ src/shared/database/schemas/constraint_build.py
 src/shared/database/schemas/coverage.py
 src/shared/database/schemas/dim_entry.py
 src/shared/database/schemas/dimension.py
+src/shared/database/schemas/import_record.py
 src/shared/database/schemas/link_shift.py
 src/shared/database/schemas/model_output.py
 src/shared/database/schemas/multitasking.py
@@ -101,6 +104,7 @@ src/shared/database/schemas/specialty.py
 src/shared/database/schemas/stats_header.py
 src/shared/database/schemas/swap.py
 src/shared/database/schemas/team.py
+src/shared/database/schemas/team_generation_settings.py
 src/shared/database/schemas/team_invitation.py
 src/shared/database/schemas/team_membership.py
 src/shared/database/schemas/user.py
@@ -154,6 +158,7 @@ src/shared/schemas/core/dimension.py
 src/shared/schemas/core/email.py
 src/shared/schemas/core/engine.py
 src/shared/schemas/core/export_options.py
+src/shared/schemas/core/import_record.py
 src/shared/schemas/core/link_shift.py
 src/shared/schemas/core/model_output.py
 src/shared/schemas/core/multitasking.py
@@ -174,6 +179,7 @@ src/shared/schemas/core/stats.py
 src/shared/schemas/core/swap.py
 src/shared/schemas/core/task.py
 src/shared/schemas/core/team.py
+src/shared/schemas/core/team_generation_settings.py
 src/shared/schemas/core/team_invitation.py
 src/shared/schemas/core/team_membership.py
 src/shared/schemas/core/user.py
@@ -181,12 +187,17 @@ src/shared/schemas/core/worker.py
 src/shared/schemas/dto/__init__.py
 src/shared/schemas/dto/assignment.py
 src/shared/schemas/dto/attribute.py
+src/shared/schemas/dto/auth.py
 src/shared/schemas/dto/breach.py
+src/shared/schemas/dto/campaign_quality.py
 src/shared/schemas/dto/constraint.py
 src/shared/schemas/dto/daily_shift_demand.py
 src/shared/schemas/dto/dim_entry.py
 src/shared/schemas/dto/dimension.py
 src/shared/schemas/dto/export_options.py
+src/shared/schemas/dto/import_merge.py
+src/shared/schemas/dto/import_preview.py
+src/shared/schemas/dto/import_record.py
 src/shared/schemas/dto/link_shift.py
 src/shared/schemas/dto/multitasking.py
 src/shared/schemas/dto/recurrence.py
@@ -201,6 +212,7 @@ src/shared/schemas/dto/specialty.py
 src/shared/schemas/dto/stats.py
 src/shared/schemas/dto/swap.py
 src/shared/schemas/dto/team.py
+src/shared/schemas/dto/team_generation_settings.py
 src/shared/schemas/dto/team_invitation.py
 src/shared/schemas/dto/user.py
 src/shared/schemas/dto/worker.py

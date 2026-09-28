@@ -1,0 +1,21 @@
+---
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: "default"
+  resource: admin
+  rules:
+    # Super admins only: full access to all admin actions
+    - actions:
+        - admin
+        - create-impersonation
+        - delete-impersonation
+        - read-users
+        - export-user-data
+        - preview-import
+        - download-template
+        - manage-imports
+        - merge-imports
+        - resolve-merge-targets
+      effect: EFFECT_ALLOW
+      roles:
+        - super_admin

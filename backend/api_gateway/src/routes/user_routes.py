@@ -1,6 +1,6 @@
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Cookie, Depends, HTTPException
 from pydantic import BaseModel, EmailStr
 from shared.database.database_collections import DatabaseCollections
 from shared.logger import log_info
@@ -9,6 +9,7 @@ from shared.schemas.dto import WorkerDTO
 from shared.schemas.dto.user import PasswordDataDTO, UserDTO, UserUpdateDTO
 
 from src.dependencies import (
+    get_cerbos_authz_service,
     get_db_collections,
     get_user_context,
     get_user_service,
@@ -19,7 +20,9 @@ from src.errors import (
     PasswordsDoNotMatchError,
     handle_routes_errors,
 )
-from src.integrations.authorization import authz_check
+from src.integrations.authorization.cerbos_authz_service import (
+    CerbosAuthzService,
+)
 from src.security.user_context import UserContext
 from src.services.user_service import UserService
 
@@ -33,6 +36,10 @@ class NewUserInput(BaseModel):
     first_name: str
     last_name: str
     language: Optional[str] = None
+
+
+class VerifyEmailInput(BaseModel):
+    code: str
 
 
 @router.post("/users/onboard", dependencies=[Depends(verify_service_authentication)])
@@ -61,9 +68,10 @@ async def onboard_new_user(
 async def get_current_user(
     user_context: UserContext = Depends(get_user_context),
     db_collections: DatabaseCollections = Depends(get_db_collections),
+    authz_service: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> UserDTO:
     try:
-        if not await authz_check(
+        if not await authz_service.check(
             user_context.user_id, "read", "user", user_context.user_id
         ):
             raise NotAuthorizedError("You do not have permission to read the user")
@@ -83,6 +91,7 @@ async def update_user(
     user_update: UserUpdateDTO,
     user_context: UserContext = Depends(get_user_context),
     user_service: UserService = Depends(get_user_service),
+    authz_service: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> UserDTO:
     """Update the authenticated user's own profile.
 
@@ -93,7 +102,9 @@ async def update_user(
     try:
         if user_context.effective_user_id != user_id:
             raise NotAuthorizedError("You can only update your own profile")
-        if not await authz_check(user_context.user_id, "update", "user", user_id):
+        if not await authz_service.check(
+            user_context.user_id, "update", "user", user_id
+        ):
             raise NotAuthorizedError("You do not have permission to update this user")
         updated_user = await user_service.update_user(
             user_id=user_id,
@@ -111,14 +122,18 @@ async def get_user_worker_for_team(
     team_id: str,
     user_context: UserContext = Depends(get_user_context),
     db_collections: DatabaseCollections = Depends(get_db_collections),
+    authz_service: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> WorkerDTO | None:
     """
     Get the worker associated with the authenticated user for a specific team.
     Returns None if no worker is linked to the user for this team.
     """
     try:
-        # Check permission to read workers for this team
-        if not await authz_check(user_context.user_id, "read-workers", "team", team_id):
+        # Check that the caller is a member of the team (any role grants access
+        # to their own worker profile in that team)
+        if not await authz_service.check(
+            user_context.user_id, "read-own-worker", "team", team_id
+        ):
             raise NotAuthorizedError(
                 "You do not have permission to access workers for this team"
             )
@@ -164,24 +179,58 @@ async def change_user_password(
     password_data: PasswordDataDTO,
     user_context: UserContext = Depends(get_user_context),
     user_service: UserService = Depends(get_user_service),
+    authz_service: CerbosAuthzService = Depends(get_cerbos_authz_service),
+    rockilus_access_token: str | None = Cookie(default=None),
 ) -> Dict:
     try:
-        # Authorization: Users can only change their own password
-        if user_context.user_id != user_id:
+        if not await authz_service.check(
+            user_context.user_id, "change-password", "user", user_id
+        ):
             raise NotAuthorizedError("You can only change your own password")
 
-        # Convert DTO to core model
         p_data = PasswordData.from_dto(password_data)
 
-        # Validate passwords match
         if p_data.new_password != p_data.new_password_confirm:
             raise PasswordsDoNotMatchError("Passwords do not match")
 
-        # Change password using Cognito
-        await user_service.change_user_password(password_data=p_data)
+        if not rockilus_access_token:
+            raise HTTPException(status_code=401, detail="Authentication required")
+
+        await user_service.change_user_password(
+            password_data=p_data, access_token=rockilus_access_token
+        )
 
         response = {"message": "Password updated successfully"}
     except Exception as e:
         log_info("Failed to update user password")
         handle_routes_errors(e)
     return response
+
+
+@router.post("/users/verify-email")
+async def verify_email_and_sync(
+    request: VerifyEmailInput,
+    user_context: UserContext = Depends(get_user_context),
+    user_service: UserService = Depends(get_user_service),
+    authz_service: CerbosAuthzService = Depends(get_cerbos_authz_service),
+    rockilus_access_token: str | None = Cookie(default=None),
+) -> Dict:
+    try:
+        if not rockilus_access_token:
+            raise HTTPException(status_code=401, detail="Authentication required")
+        if not await authz_service.check(
+            user_context.user_id, "update", "user", user_context.user_id
+        ):
+            raise NotAuthorizedError("You do not have permission to verify email")
+        updated_user = await user_service.verify_email_and_sync_db(
+            access_token=rockilus_access_token,
+            code=request.code,
+            user_id=user_context.effective_user_id,
+        )
+        log_info(
+            f"Email verification and DB sync succeeded for user {user_context.user_id}"
+        )
+        return {"status": "success", "email": updated_user.email}
+    except Exception as e:
+        log_info("Email verification failed")
+        handle_routes_errors(e)

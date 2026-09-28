@@ -11,6 +11,9 @@ from shared.database.repositories.constraint_build import (
 from shared.database.repositories.coverage import CoverageRepository
 from shared.database.repositories.dim_entry import DimEntryRepository
 from shared.database.repositories.dimension import DimensionRepository
+from shared.database.repositories.import_record import (
+    ImportRecordRepository,
+)
 from shared.database.repositories.link_shift import LinkShiftRepository
 from shared.database.repositories.model_output import ModelOutputRepository
 from shared.database.repositories.multitasking import (
@@ -44,6 +47,9 @@ from shared.database.repositories.specialty import SpecialtyRepository
 from shared.database.repositories.stats_header import StatsHeaderRepository
 from shared.database.repositories.swap import SwapRepository
 from shared.database.repositories.team import TeamRepository
+from shared.database.repositories.team_generation_settings import (
+    TeamGenerationSettingsRepository,
+)
 from shared.database.repositories.team_invitation import (
     TeamInvitationRepository,
 )
@@ -88,6 +94,8 @@ class DatabaseCollections:
     worker_db: WorkerRepository
     notification_db: NotificationRepository
     notification_preferences_db: NotificationPreferencesRepository
+    team_generation_settings_db: TeamGenerationSettingsRepository
+    import_record_db: ImportRecordRepository
 
     def __init__(self, database_interface: DatabaseInterface):
         """
@@ -137,6 +145,10 @@ class DatabaseCollections:
         self.notification_preferences_db = NotificationPreferencesRepository(
             database_interface
         )
+        self.team_generation_settings_db = TeamGenerationSettingsRepository(
+            database_interface
+        )
+        self.import_record_db = ImportRecordRepository(database_interface)
 
     async def health_check(self) -> bool:
         """Check the health of the database connection."""

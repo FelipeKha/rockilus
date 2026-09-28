@@ -15,19 +15,24 @@ from shared.schemas.dto import (
     AssignmentsRecurrencesResultDTO,
     BulkAssignmentCreateDTO,
     BulkAssignmentDeleteDTO,
+    BulkAssignmentToggleFixedDTO,
     BulkAssignmentUpdateDTO,
     RecurrenceRuleDTO,
+    SelectionIntentDTO,
 )
 from shared.schemas.dto.replacement import ReplacementCandidateDTO
 
 from src.dependencies import (
     get_assignment_service,
+    get_cerbos_authz_service,
     get_replacement_service,
     get_user_context,
 )
 from src.dependencies.notification_service import get_notification_service
 from src.errors import NotAuthorizedError, handle_routes_errors
-from src.integrations.authorization import authz_check
+from src.integrations.authorization.cerbos_authz_service import (
+    CerbosAuthzService,
+)
 from src.security.user_context import UserContext
 from src.services.assignment_service import AssignmentService
 from src.services.notification_service import (
@@ -41,6 +46,19 @@ from src.services.replacement_service import ReplacementService
 router = APIRouter()
 
 
+def _check_intent_ownership(
+    intent: Optional[SelectionIntentDTO],
+    team_id: str,
+    schedule_db,
+) -> None:
+    """BOLA guard: raise NotAuthorizedError if the intent campaign doesn't belong to this team."""
+    if intent is None:
+        return
+    schedule = schedule_db.get_schedule_by_id(intent.campaign_id)
+    if not schedule or schedule.team_id != team_id:
+        raise NotAuthorizedError("Campaign does not belong to the specified team")
+
+
 @router.post("/assignments/teams/{team_id}", status_code=201)
 async def create_assignment(
     team_id: str,
@@ -49,9 +67,10 @@ async def create_assignment(
     user_context: UserContext = Depends(get_user_context),
     assignment_service: AssignmentService = Depends(get_assignment_service),
     notification_service: NotificationService = Depends(get_notification_service),
+    authz: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> AssignmentsRecurrencesResultDTO:
     try:
-        if not await authz_check(
+        if not await authz.check(
             user_context.user_id, "create-assignment", "team", team_id
         ):
             raise NotAuthorizedError(
@@ -86,6 +105,7 @@ async def get_assignments(
     assignment_service: AssignmentService = Depends(
         get_assignment_service,
     ),
+    authz: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> AssignmentsRecurrencesResultDTO:
     try:
         # Validate date range
@@ -105,7 +125,7 @@ async def get_assignments(
         #   that fails, fall back to checking full `read-assignments` so
         #   admins/privileged users are still allowed.
         if include_campaign:
-            if not await authz_check(
+            if not await authz.check(
                 user_context.user_id, "read-assignments", "team", team_id
             ):
                 raise NotAuthorizedError(
@@ -113,14 +133,14 @@ async def get_assignments(
                 )
         else:
             # Fast path: validated members
-            if not await authz_check(
+            if not await authz.check(
                 user_context.user_id,
                 "read-assignments-validated",
                 "team",
                 team_id,
             ):
                 # Fall back to full permission for privileged users
-                if not await authz_check(
+                if not await authz.check(
                     user_context.user_id, "read-assignments", "team", team_id
                 ):
                     raise NotAuthorizedError(
@@ -155,16 +175,21 @@ async def bulk_create_assignments(
     user_context: UserContext = Depends(get_user_context),
     assignment_service: AssignmentService = Depends(get_assignment_service),
     notification_service: NotificationService = Depends(get_notification_service),
+    authz: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> AssignmentsRecurrencesResultDTO:
     try:
-        if not await authz_check(
+        if not await authz.check(
             user_context.user_id, "create-assignment", "team", team_id
         ):
             raise NotAuthorizedError(
                 "You do not have permission to create assignments",
             )
-        assignments = [Assignment.from_dto(a) for a in body.assignments]
-        ar_result = assignment_service.bulk_create_assignments(assignments)
+        _check_intent_ownership(
+            body.intent, team_id, assignment_service.collection.schedule_db
+        )
+        ar_result = assignment_service.bulk_create_assignments(
+            body.cells, body.entity_id, body.group_by, team_id, body.intent
+        )
         ops = [
             AssignmentOperation(before=None, after=a)
             for a in ar_result.assignments_created
@@ -184,23 +209,28 @@ async def bulk_update_assignments(
     user_context: UserContext = Depends(get_user_context),
     assignment_service: AssignmentService = Depends(get_assignment_service),
     notification_service: NotificationService = Depends(get_notification_service),
+    authz: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> AssignmentsRecurrencesResultDTO:
     try:
-        if not await authz_check(
+        if not await authz.check(
             user_context.user_id, "update-assignment", "team", team_id
         ):
             raise NotAuthorizedError(
                 "You do not have permission to update assignments",
             )
-        assignments = [Assignment.from_dto(a) for a in body.assignments]
-        # Pre-fetch "before" state
-        ids = [a.id for a in assignments if a.id]
-        before_map: dict[str, Assignment] = {}
-        if ids:
-            asgn_db = assignment_service.collection.assignment_db
-            before_list = asgn_db.get_assignments_by_ids(ids)
-            before_map = {a.id: a for a in before_list}
-        ar_result = assignment_service.bulk_update_assignments(assignments)
+        _check_intent_ownership(
+            body.intent, team_id, assignment_service.collection.schedule_db
+        )
+        new_worker_id: Optional[str] = (
+            body.entity_id if body.group_by == "shift" else None
+        )
+        new_shift_id: Optional[str] = (
+            body.entity_id if body.group_by == "worker" else None
+        )
+        before_map = assignment_service.get_assignments_map(body.assignment_ids)
+        ar_result = assignment_service.bulk_update_assignments(
+            body.assignment_ids, new_worker_id, new_shift_id, body.intent
+        )
         ops = [
             AssignmentOperation(
                 before=before_map.get(a.id),
@@ -223,24 +253,60 @@ async def bulk_delete_assignments(
     user_context: UserContext = Depends(get_user_context),
     assignment_service: AssignmentService = Depends(get_assignment_service),
     notification_service: NotificationService = Depends(get_notification_service),
+    authz: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> AssignmentsRecurrencesResultDTO:
     try:
-        if not await authz_check(
+        if not await authz.check(
             user_context.user_id, "delete-assignment", "team", team_id
         ):
             raise NotAuthorizedError(
                 "You do not have permission to delete assignments",
             )
-        # Pre-fetch "before" state
-        before_list = (
-            assignment_service.collection.assignment_db.get_assignments_by_ids(body.ids)
+        _check_intent_ownership(
+            body.intent, team_id, assignment_service.collection.schedule_db
         )
-        ar_result = assignment_service.bulk_delete_assignments(body.ids)
-        ops = [AssignmentOperation(before=a, after=None) for a in before_list]
+        before_map = assignment_service.get_assignments_map(body.ids)
+        ar_result = assignment_service.bulk_delete_assignments(body.ids, body.intent)
+        ops = [AssignmentOperation(before=a, after=None) for a in before_map.values()]
         await notification_service.notify_assignment_crud(ops, team_id)
         response = ar_result.to_dto()
     except Exception as e:
         log_info("Failed to bulk delete assignments")
+        handle_routes_errors(e)
+    return response
+
+
+@router.post("/assignments/bulk/toggle-fixed/teams/{team_id}")
+async def bulk_toggle_fixed_assignments(
+    team_id: str,
+    body: BulkAssignmentToggleFixedDTO,
+    user_context: UserContext = Depends(get_user_context),
+    assignment_service: AssignmentService = Depends(get_assignment_service),
+    notification_service: NotificationService = Depends(get_notification_service),
+    authz: CerbosAuthzService = Depends(get_cerbos_authz_service),
+) -> AssignmentsRecurrencesResultDTO:
+    try:
+        if not await authz.check(
+            user_context.user_id, "update-assignment", "team", team_id
+        ):
+            raise NotAuthorizedError(
+                "You do not have permission to update assignments",
+            )
+        _check_intent_ownership(
+            body.intent, team_id, assignment_service.collection.schedule_db
+        )
+        before_map = assignment_service.get_assignments_map(body.assignment_ids)
+        ar_result = assignment_service.bulk_toggle_fixed_assignments(
+            body.assignment_ids, body.intent
+        )
+        ops = [
+            AssignmentOperation(before=before_map.get(a.id), after=a)
+            for a in ar_result.assignments_updated
+        ]
+        await notification_service.notify_assignment_crud(ops, team_id)
+        response = ar_result.to_dto()
+    except Exception as e:
+        log_info("Failed to bulk toggle fixed assignments")
         handle_routes_errors(e)
     return response
 
@@ -257,9 +323,10 @@ async def update_assignment(
     user_context: UserContext = Depends(get_user_context),
     assignment_service: AssignmentService = Depends(get_assignment_service),
     notification_service: NotificationService = Depends(get_notification_service),
+    authz: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> AssignmentsRecurrencesResultDTO:
     try:
-        if not await authz_check(
+        if not await authz.check(
             user_context.user_id, "update-assignment", "team", team_id
         ):
             raise NotAuthorizedError(
@@ -308,9 +375,10 @@ async def delete_assignment(
     user_context: UserContext = Depends(get_user_context),
     assignment_service: AssignmentService = Depends(get_assignment_service),
     notification_service: NotificationService = Depends(get_notification_service),
+    authz: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> AssignmentsRecurrencesResultDTO:
     try:
-        if not await authz_check(
+        if not await authz.check(
             user_context.user_id, "delete-assignment", "team", team_id
         ):
             raise NotAuthorizedError(
@@ -347,9 +415,10 @@ async def get_replacement_candidates(
     team_id: str,
     user_context: UserContext = Depends(get_user_context),
     replacement_service: ReplacementService = Depends(get_replacement_service),
+    authz: CerbosAuthzService = Depends(get_cerbos_authz_service),
 ) -> list[ReplacementCandidateDTO]:
     try:
-        if not await authz_check(
+        if not await authz.check(
             user_context.user_id, "check-replacements", "team", team_id
         ):
             raise NotAuthorizedError(

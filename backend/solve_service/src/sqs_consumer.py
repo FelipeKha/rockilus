@@ -7,6 +7,7 @@ for solve requests and processes them using the existing solve logic.
 
 import asyncio
 import time
+import traceback
 from datetime import UTC, datetime
 
 from loguru import logger
@@ -16,6 +17,7 @@ from shared.schemas.core import (
     Breach,
     SQSSolveMessage,
     SQSSolveQueueMessage,
+    TeamGenerationSettings,
 )
 from shared.schemas.core.solve_task_status import (
     ResultModel,
@@ -74,7 +76,9 @@ class SQSSolveConsumer:
                     try:
                         await self._process_message(message_data)
                     except Exception as e:
-                        logger.error(f"Failed to process message: {e}")
+                        logger.error(
+                            f"Failed to process message: {e}\n{traceback.format_exc()}"
+                        )
                         # Message will be returned to queue for retry
 
             except Exception as e:
@@ -127,7 +131,7 @@ class SQSSolveConsumer:
         except Exception as e:
             logger.error(
                 f"Failed to process solve request for schedule "
-                f"{message_content.schedule_id}: {e}"
+                f"{message_content.schedule_id}: {e}\n{traceback.format_exc()}"
             )
 
             # Update schedule with failure
@@ -172,9 +176,14 @@ class SQSSolveConsumer:
             schedule=schedule,
             collections=self.collections,
         )
+        # Load team generation settings
+        team_settings = self.collections.team_generation_settings_db.get_by_team_id(
+            schedule.team_id
+        ) or TeamGenerationSettings.default(schedule.team_id)
         engine_outputs, processing_cache = solve_schedule(
             engine_inputs=engine_inputs,
             solve_scope=message.solve_scope,
+            team_settings=team_settings,
         )
         schedule_solve_status, assignments, breaches, solver_output = (
             save_engine_outputs(

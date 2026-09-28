@@ -17,49 +17,73 @@ services:
       retries: 5
 
   # LocalStack (to emulate SQS)
+  # SQS queues are created by the native ready.d init hook (scripts/init-localstack-sqs.sh);
+  # the healthcheck only passes once that hook has run successfully.
   localstack:
-    image: localstack/localstack
+    image: localstack/localstack:3.4
     container_name: localstack
     ports:
       - "4566:4566"
     environment:
       - SERVICES=sqs
       - DEBUG=1
+    volumes:
+      - ./scripts/init-localstack-sqs.sh:/etc/localstack/init/ready.d/init-sqs.sh:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/init/ready | grep -q '\"state\": \"SUCCESSFUL\"'"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 15s
 
-  # LocalStack SQS Queue Initializer
-  localstack-init:
+  # cognito-local — offline Cognito emulator for E2E auth tests
+  cognito-local:
+    image: jagregory/cognito-local:latest
+    container_name: cognito-local
+    ports:
+      - "9229:9229"
+    environment:
+      - PORT=9229
+      - CODE=123456          # fixed confirmation code for deterministic tests
+    volumes:
+      - cognito_local_data:/app/.cognito
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:9229',function(r){process.exit(0)}).on('error',function(){process.exit(1)})"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+      start_period: 10s
+
+  # Cognito Local Initializer
+  cognito-local-init:
     image: amazon/aws-cli:latest
-    container_name: localstack-init
+    container_name: cognito-local-init
     depends_on:
-      localstack:
+      cognito-local:
         condition: service_healthy
     environment:
       - AWS_ACCESS_KEY_ID=test
       - AWS_SECRET_ACCESS_KEY=test
       - AWS_DEFAULT_REGION=eu-west-3
-      - LOCALSTACK_ENDPOINT=http://localstack:4566
+      - COGNITO_ENDPOINT=http://cognito-local:9229
     volumes:
-      - ./scripts/init-localstack-sqs.sh:/init-localstack-sqs.sh:ro
-    entrypoint: ["/bin/bash", "/init-localstack-sqs.sh"]
+      - ./scripts/init-cognito-local.sh:/init-cognito-local.sh:ro
+    entrypoint: ["/bin/bash", "/init-cognito-local.sh"]
 
-  # Permit.io PDP
-  permit:
-    image: permitio/pdp-v2:latest
-    container_name: permit
+  # Cerbos AuthZ
+  cerbos:
+    build:
+      context: ./cerbos-policies
+      dockerfile: Dockerfile
+    container_name: cerbos
     ports:
-      - "7766:7000"
-    env_file:
-      - .env.docker-compose.permit
-    # environment:
-    #   - PDP_API_KEY=your_api_key_here # Replace with your actual API key
-    #   - PDP_DEBUG=True
+      - "3592:3592"  # gRPC
+      - "3593:3593"  # HTTP / playground
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://permit:7766/health"]
+      test: ["CMD", "wget", "-qO-", "http://cerbos:3593/api/health"]
       interval: 10s
       timeout: 5s
       retries: 5
+
+volumes:
+  cognito_local_data:

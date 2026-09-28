@@ -5,15 +5,20 @@ from src.dependencies.auth_dependencies import (
     get_user_context,
     verify_service_authentication,
 )
+from src.dependencies.auth_service import get_auth_service
+from src.dependencies.campaign_quality_service import (
+    get_campaign_quality_service,
+)
+from src.dependencies.cerbos_authz_dependencies import get_cerbos_authz_service
 from src.dependencies.constraint_build_service import (
     get_constraint_build_service,
 )
-from src.dependencies.coverage_service import get_coverage_service
 from src.dependencies.data_fetching_service import get_data_fetching_service
 from src.dependencies.database import get_db_collections
 from src.dependencies.dim_entry_service import get_dim_entry_service
 from src.dependencies.dimension_service import get_dimension_service
 from src.dependencies.email_queue_service import get_email_queue_service
+from src.dependencies.import_service import get_import_service
 from src.dependencies.link_shift_service import get_link_shift_service
 from src.dependencies.multitasking_service import get_multitasking_service
 from src.dependencies.notification_preferences_service import (
@@ -26,7 +31,6 @@ from src.dependencies.schedule_service import get_schedule_service
 from src.dependencies.shift_demand_new_service import (
     get_shift_demand_new_service,
 )
-from src.dependencies.shift_demand_service import get_shift_demand_service
 from src.dependencies.shift_demand_template_service import (
     get_shift_demand_template_service,
 )
@@ -44,11 +48,12 @@ from src.dependencies.worker_service import get_worker_service
 __all__ = [
     "get_assignment_service",
     "get_attribute_service",
+    "get_auth_service",
+    "get_campaign_quality_service",
     "get_effective_user_context",
     "get_user_context",
     "verify_service_authentication",
     "get_constraint_build_service",
-    "get_coverage_service",
     "get_data_fetching_service",
     "get_db_collections",
     "get_dim_entry_service",
@@ -60,8 +65,8 @@ __all__ = [
     "get_multitasking_service",
     "get_replacement_service",
     "get_request_service",
+    "get_import_service",
     "get_schedule_service",
-    "get_shift_demand_service",
     "get_shift_demand_new_service",
     "get_shift_demand_template_service",
     "get_shift_service",
@@ -74,4 +79,5 @@ __all__ = [
     "get_test_service",
     "get_user_service",
     "get_worker_service",
+    "get_cerbos_authz_service",
 ]

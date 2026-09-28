@@ -3,10 +3,23 @@ from shared.schemas.dto.assignment import (
     AssignmentsRecurrencesResultDTO,
     BulkAssignmentCreateDTO,
     BulkAssignmentDeleteDTO,
+    BulkAssignmentToggleFixedDTO,
     BulkAssignmentUpdateDTO,
+    SelectionIntentDTO,
 )
 from shared.schemas.dto.attribute import AttributeDTO
+from shared.schemas.dto.auth import (
+    ChangeEmailRequestDTO,
+    ConfirmCodeRequestDTO,
+    ConfirmForgotPasswordRequestDTO,
+    ForgotPasswordRequestDTO,
+    ResendCodeRequestDTO,
+    SignInRequestDTO,
+    SignUpRequestDTO,
+    VerifyEmailRequestDTO,
+)
 from shared.schemas.dto.breach import BreachDTO
+from shared.schemas.dto.campaign_quality import CampaignQualityDTO, WorkerQualityDTO
 from shared.schemas.dto.constraint import (
     BlockDTO,
     ConstraintBuildDTO,
@@ -25,6 +38,25 @@ from shared.schemas.dto.dimension import (
     NewDimensionDTO,
 )
 from shared.schemas.dto.export_options import ExportOptionsDTO
+from shared.schemas.dto.import_merge import (
+    AssignmentMergeConfig,
+    MergeAction,
+    MergeRequest,
+    MergeResult,
+    MergeTargetShift,
+    MergeTargetsResponse,
+    MergeTargetWorker,
+    RequestMergeMapping,
+    ShiftMergeMapping,
+    WorkerMergeMapping,
+)
+from shared.schemas.dto.import_preview import (
+    ImportAssignmentPreviewDTO,
+    ImportMemberPreviewDTO,
+    ImportPreviewDTO,
+    ImportRequestPreviewDTO,
+    ImportShiftPreviewDTO,
+)
 from shared.schemas.dto.link_shift import LinkShiftDTO
 from shared.schemas.dto.multitasking import (
     CreateMultitaskingGroupRequest,
@@ -73,9 +105,14 @@ from shared.schemas.dto.swap import (
     SwapRequestDTO,
 )
 from shared.schemas.dto.team import (
+    AdminTeamRowDTO,
     MembershipForTeamWithMembershipDTO,
+    PaginatedTeamsResponse,
     TeamDTO,
     TeamWithMembershipDTO,
+)
+from shared.schemas.dto.team_generation_settings import (
+    TeamGenerationSettingsDTO,
 )
 from shared.schemas.dto.team_invitation import (
     EnrichedTeamInvitationDTO,
@@ -89,13 +126,25 @@ from shared.schemas.dto.user import (
 from shared.schemas.dto.worker import WorkerDTO
 
 __all__ = [
+    "ChangeEmailRequestDTO",
+    "ConfirmCodeRequestDTO",
+    "ConfirmForgotPasswordRequestDTO",
+    "ForgotPasswordRequestDTO",
+    "ResendCodeRequestDTO",
+    "SignInRequestDTO",
+    "SignUpRequestDTO",
+    "VerifyEmailRequestDTO",
     "AssignmentDTO",
     "AssignmentsRecurrencesResultDTO",
     "BulkAssignmentCreateDTO",
     "BulkAssignmentDeleteDTO",
+    "BulkAssignmentToggleFixedDTO",
     "BulkAssignmentUpdateDTO",
+    "SelectionIntentDTO",
     "AttributeDTO",
     "BreachDTO",
+    "CampaignQualityDTO",
+    "WorkerQualityDTO",
     "BlockDTO",
     "ConstraintBuildDTO",
     "MissingAttributeDTO",
@@ -108,6 +157,21 @@ __all__ = [
     "DimensionsAndDimEntriesDTO",
     "NewDimensionDTO",
     "ExportOptionsDTO",
+    "ImportAssignmentPreviewDTO",
+    "ImportMemberPreviewDTO",
+    "ImportPreviewDTO",
+    "ImportRequestPreviewDTO",
+    "ImportShiftPreviewDTO",
+    "AssignmentMergeConfig",
+    "MergeAction",
+    "MergeRequest",
+    "MergeResult",
+    "MergeTargetShift",
+    "MergeTargetWorker",
+    "MergeTargetsResponse",
+    "RequestMergeMapping",
+    "ShiftMergeMapping",
+    "WorkerMergeMapping",
     "LinkShiftDTO",
     "AddBidRequestDTO",
     "CreateSwapRequestDTO",
@@ -144,8 +208,11 @@ __all__ = [
     "StatsHeaderDTO",
     "StatsOptionsDTO",
     "StatsValueDTO",
+    "AdminTeamRowDTO",
     "MembershipForTeamWithMembershipDTO",
+    "PaginatedTeamsResponse",
     "TeamDTO",
+    "TeamGenerationSettingsDTO",
     "TeamWithMembershipDTO",
     "EnrichedTeamInvitationDTO",
     "TeamInvitationDTO",

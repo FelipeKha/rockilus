@@ -185,9 +185,12 @@ from shared.schemas.core.swap import (
 from shared.schemas.core.task import TaskServices
 from shared.schemas.core.team import (
     MembershipForTeamWithMembership,
+    SlotPeriod,
+    SlotPeriods,
     Team,
     TeamWithMembership,
 )
+from shared.schemas.core.team_generation_settings import TeamGenerationSettings
 from shared.schemas.core.team_invitation import (
     EnrichedTeamInvitation,
     TeamInvitation,
@@ -207,7 +210,14 @@ from shared.schemas.core.user import (
     User,
     UserWithMembership,
 )
-from shared.schemas.core.worker import Worker, WorkerDates
+from shared.schemas.core.worker import (
+    SlotRestriction,
+    WeeklyPreferences,
+    WeeklySlotPreference,
+    WeekParity,
+    Worker,
+    WorkerDates,
+)
 
 # pylint: disable=R0801
 __all__ = [
@@ -363,6 +373,9 @@ __all__ = [
     "SQSSolveMessage",
     "SQSSolveQueueMessage",
     "WorkerDateCell",
+    "SlotPeriod",
+    "SlotPeriods",
+    "TeamGenerationSettings",
     "TeamWithMembership",
     "Team",
     "MembershipForTeamWithMembership",
@@ -381,4 +394,8 @@ __all__ = [
     "UserWithMembership",
     "Worker",
     "WorkerDates",
+    "WeeklyPreferences",
+    "WeeklySlotPreference",
+    "WeekParity",
+    "SlotRestriction",
 ]

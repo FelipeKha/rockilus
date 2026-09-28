@@ -1,11 +1,9 @@
-import React, { Dispatch, SetStateAction } from 'react';
-// MUI
-import TableCell from '@mui/material/TableCell';
+import React from 'react';
 // Components
 import ShiftFieldCellColor from './shift-field-cell-color';
 import ShiftFieldCellName from './shift-field-cell-name';
 import ShiftFieldCellAcronym from './shift-field-cell-acronym';
-import ShiftFieldCellDuty from './shift-field-cell-duty';
+import ShiftFieldCellType from './shift-field-cell-type';
 import ShiftFieldCellRecuperation from './shift-field-cell-recuperation';
 import ShiftFieldCellStartTime from './shift-field-cell-start-time';
 import ShiftFieldCellEndTime from './shift-field-cell-end-time';
@@ -28,7 +26,7 @@ export default function ShiftFieldCell({
   specialties: SpecialtyT[];
   shiftField: string;
   editing: { [key: string]: string };
-  setEditing: Dispatch<SetStateAction<{}>>;
+  setEditing: React.Dispatch<React.SetStateAction<{}>>;
   handleUpdateShift: (updatedShift: ShiftT) => void;
 }) {
   return shiftField === 'color' ? (
@@ -49,8 +47,8 @@ export default function ShiftFieldCell({
       setEditing={setEditing}
       handleUpdateShift={handleUpdateShift}
     />
-  ) : shiftField === 'duty' ? (
-    <ShiftFieldCellDuty shift={shift} handleUpdateShift={handleUpdateShift} />
+  ) : shiftField === 'type' ? (
+    <ShiftFieldCellType shift={shift} handleUpdateShift={handleUpdateShift} />
   ) : shiftField === 'recuperation' ? (
     <ShiftFieldCellRecuperation
       lng={lng}
@@ -75,11 +73,12 @@ export default function ShiftFieldCell({
     />
   ) : shiftField === 'staffing' ? (
     <ShiftStaffingCell
+      lng={lng}
       shift={shift}
       specialties={specialties}
       handleUpdateShift={handleUpdateShift}
     />
   ) : (
-    <TableCell></TableCell>
+    <td></td>
   );
 }

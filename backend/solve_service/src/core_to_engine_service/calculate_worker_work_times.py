@@ -184,12 +184,18 @@ def calculate_adjustment_coefficients(
         for i, period in enumerate(periods):
             worker_period = [d for d in period if d in workers_empl_dates[worker.id]]
 
-            # Calculate the number of time off days in the period
-            rls_worker = [r for r in requests_leave if r.worker_id == worker.id]
-            time_off_days = calculate_time_off_days(rls_worker, worker_period, shifts)
-
-            # Adjust the period length for time off days
-            adjusted_length = max(0, len(worker_period) - time_off_days)
+            # If the worker has no employment overlap with this period, the
+            # coefficient is 0 — skip the time-off calculation entirely.
+            if not worker_period:
+                adjusted_length = 0.0
+            else:
+                # Calculate the number of time off days in the period
+                rls_worker = [r for r in requests_leave if r.worker_id == worker.id]
+                time_off_days = calculate_time_off_days(
+                    rls_worker, worker_period, shifts
+                )
+                # Adjust the period length for time off days
+                adjusted_length = max(0, len(worker_period) - time_off_days)
             if worker.id not in w_id_to_coef:
                 w_id_to_coef[worker.id] = []
             if ref_period_lengths[i] == 0:
@@ -259,24 +265,29 @@ def calculate_total_work_time_minutes(
         shift = shift_dict.get(dsd.shift_id, None)
         if shift is None:
             continue
-        if shift and shift.shift_type in [ShiftType.NORMAL, ShiftType.DUTY]:
-            # Compute total staffing for the shift (sum of all staffing entries)
+        if shift and shift.shift_type in [
+            ShiftType.NORMAL,
+            ShiftType.DUTY,
+            ShiftType.ON_CALL,
+        ]:
             total_staffing = (
                 sum(s.staffing for s in shift.staffing) if shift.staffing else 0
             )
 
-            # If there is no staffing configured for this shift, it contributes 0
             if total_staffing == 0:
                 continue
 
-            shift_duration = max(
-                int(
-                    (shift.end_time - shift.start_time).total_seconds()
-                    / Constants.NUM_SECONDS_MINUTE
-                    - 1
-                ),
-                0,
-            )
+            if shift.use_custom_work_time:
+                shift_duration = shift.custom_work_time_minutes
+            else:
+                shift_duration = max(
+                    int(
+                        (shift.end_time - shift.start_time).total_seconds()
+                        / Constants.NUM_SECONDS_MINUTE
+                        - 1
+                    ),
+                    0,
+                )
 
             # Work time is duration * demand count * total staffing
             total_work_time += shift_duration * dsd.count * total_staffing

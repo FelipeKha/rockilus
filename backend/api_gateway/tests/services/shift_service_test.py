@@ -933,3 +933,103 @@ def test_delete_shift_duty_shift(
             team_id=shift_recup.team_id, shift_id=shift_recup.id
         )
     # fmt: on
+
+
+def _make_work_shift(duration: timedelta) -> Shift:
+    start = datetime(2023, 10, 1, 8, 0, tzinfo=timezone.utc)
+    return Shift(
+        id="1",
+        team_id="team1",
+        name="Normal Shift",
+        acronym="NS",
+        acronym_custom=False,
+        start_time=start,
+        end_time=start + duration,
+        staffing=[],
+        color="#FFFFFF",
+        shift_type=ShiftType.NORMAL,
+        rest_type=ShiftRestType.NONE,
+        leave_type=ShiftLeaveType.NONE,
+        recuperation_time=0,
+        recuperation_duty_id=None,
+        deleted=False,
+    )
+
+
+def test_create_shift_duration_too_long(
+    shift_service: ShiftService, mock_collection: MagicMock
+) -> None:
+    shift = _make_work_shift(timedelta(days=30, minutes=1))
+
+    with pytest.raises(ValueError, match="Shift duration must be at most 30 days"):
+        shift_service.create_shift(shift)
+    mock_collection.shift_db.create_shift.assert_not_called()
+
+
+def test_create_shift_duration_not_positive(
+    shift_service: ShiftService, mock_collection: MagicMock
+) -> None:
+    shift = _make_work_shift(timedelta(0))
+    mock_collection.shift_db.create_shift.return_value = shift
+    # fmt: off
+    mock_collection.dimension_db.get_dimensions_by_dim_types_and_entry_type\
+        .return_value = []
+    # fmt: on
+    mock_collection.attribute_db.create_attributes.return_value = []
+
+    shift_created, _ = shift_service.create_shift(shift)
+
+    assert shift_created.end_time == shift_created.start_time + timedelta(hours=1)
+    mock_collection.shift_db.create_shift.assert_called_once()
+
+
+def test_create_shift_duration_max_allowed(
+    shift_service: ShiftService, mock_collection: MagicMock
+) -> None:
+    shift = _make_work_shift(timedelta(days=30))
+    mock_collection.shift_db.create_shift.return_value = shift
+    # fmt: off
+    mock_collection.dimension_db.get_dimensions_by_dim_types_and_entry_type\
+        .return_value = []
+    # fmt: on
+    mock_collection.attribute_db.create_attributes.return_value = []
+
+    shift_created, _ = shift_service.create_shift(shift)
+
+    assert shift_created == shift
+    mock_collection.shift_db.create_shift.assert_called_once_with(shift)
+
+
+def test_update_shift_duration_too_long(
+    shift_service: ShiftService, mock_collection: MagicMock
+) -> None:
+    shift_old = _make_work_shift(timedelta(hours=8))
+    mock_collection.shift_db.get_shift_by_id.return_value = shift_old
+    shift_new = _make_work_shift(timedelta(days=31))
+
+    with pytest.raises(ValueError, match="Shift duration must be at most 30 days"):
+        shift_service.update_shift(shift_new)
+    mock_collection.shift_db.update_shift.assert_not_called()
+
+
+def test_update_shift_duration_not_positive(
+    shift_service: ShiftService,
+    mock_collection: MagicMock,
+    mock_link_shift_service: MagicMock,
+) -> None:
+    shift_old = _make_work_shift(timedelta(hours=8))
+    mock_collection.shift_db.get_shift_by_id.return_value = shift_old
+    shift_new = _make_work_shift(timedelta(hours=-1))
+    shift_saved_mock = deepcopy(shift_new)
+    # Simulate the auto-correction that validate_shift_duration will apply
+    shift_saved_mock.end_time = shift_saved_mock.start_time + timedelta(hours=1)
+    mock_collection.shift_db.update_shift.return_value = shift_saved_mock
+    mock_link_shift_service.update_link_shift_upon_shift_update = MagicMock(
+        return_value={}
+    )
+
+    result, _ = shift_service.update_shift(shift_new)
+
+    # end_time was auto-corrected to start_time + 1h
+    assert result.end_time == result.start_time + timedelta(hours=1)
+    mock_collection.shift_db.update_shift.assert_called_once()

@@ -1,20 +1,22 @@
 import React from 'react';
 import dayjs, { Dayjs } from 'dayjs';
-import './RequestCalendarTable.css';
+import { calendarGridTemplate } from '@/constants/constants';
+import isoWeek from 'dayjs/plugin/isoWeek';
+import { cn } from '@/lib/utils';
 import { StaffingSummaryLoadingIndicator } from './StaffingSummaryLoadingIndicator';
 import { RequestT, RequestType, RequestStatus, FulfillmentStatus } from '../../types/request';
 import { WorkerT } from '../../types/worker';
 import { ShiftT } from '../../types/shift';
-import { ShiftColorMappings } from '../../constants/constants';
-import { SWOIdTypes } from '../../types/constraint';
 import {
   getRequestTargetDisplayText,
   getShiftColors,
 } from '../../utils/shift-worker-option-display';
 import { ColumnDefinition, ColumnFilter, TableSort } from '../../types/filter';
-import ColumnSortFilterMenu from '../table/ColumnSortFilterMenu';
-import { Typography } from '@mui/material';
 import { useTranslation } from '../../app/i18n/client';
+import CalendarTableHeader from '../calendar/CalendarTableHeader';
+import CalendarRowHeaderCell from '../calendar/CalendarRowHeaderCell';
+
+dayjs.extend(isoWeek);
 
 type StaffingSummary = {
   [date: string]: {
@@ -71,17 +73,6 @@ interface RequestCalendarRowProps {
   onRequestClick: (request: RequestT) => void;
 }
 
-interface RequestCalendarHeaderProps {
-  lng?: string;
-  days: Dayjs[];
-  // Filter/Sort props
-  currentSort?: TableSort;
-  currentFilter?: ColumnFilter;
-  onSort?: (sort: TableSort | null) => void;
-  onFilter?: (filter: ColumnFilter) => void;
-  workerColumn?: ColumnDefinition;
-}
-
 interface RequestCalendarBodyProps {
   workers: WorkerT[];
   days: Dayjs[];
@@ -100,9 +91,6 @@ interface StaffingSummaryRowsProps {
   staffingSummary: StaffingSummary | null;
   isCalculating: boolean;
 }
-
-// Constants
-const daysOfWeek = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
 
 // Individual cell component
 function RequestCalendarCell({
@@ -223,29 +211,48 @@ function RequestCalendarCell({
 
   const requestEmojis = getRequestEmojis();
 
-  // Get status-specific CSS class
-  const getStatusClass = () => {
-    if (!request) return '';
-
-    switch (request.status) {
-      case RequestStatus.PENDING:
-        return ' calendar-cell--status-pending';
-      case RequestStatus.DENIED:
-        return ' calendar-cell--status-denied';
-      case RequestStatus.APPROVED:
-      default:
-        return '';
+  // Get status-specific inline style (pending uses diagonal stripe, can't do in Tailwind)
+  const getStatusStyle = (): React.CSSProperties => {
+    if (!request) return {};
+    if (request.status === RequestStatus.PENDING) {
+      return {
+        background: `repeating-linear-gradient(
+          -45deg,
+          var(--shift-bg-color, #f5f5f5),
+          var(--shift-bg-color, #f5f5f5) 6px,
+          rgba(255,255,255,0.6) 6px,
+          rgba(255,255,255,0.6) 12px
+        )`,
+      };
     }
+    return {};
   };
+
+  const isWeekBoundary = date.isoWeekday() === 1;
 
   return (
     <div
       key={date.date()}
-      className={`calendar-cell${isWeekend ? 'weekend' : ''}${
-        request ? 'calendar-cell--leave' : ''
-      }${canAddRequest || canEditRequest ? 'calendar-cell--clickable' : ''}${
-        isPastEmpty ? 'calendar-cell--past' : ''
-      }${getStatusClass()}`}
+      className={cn(
+        // Base cell
+        'relative flex min-h-[40px] items-center justify-center border-r border-border/50 p-1 text-xs transition-all duration-200',
+        // Week boundary: thick left border on Mondays (except the very first cell)
+        isWeekBoundary && 'border-l-2 border-l-border',
+        // Weekend background
+        isWeekend && 'bg-muted',
+        // Leave/request cell
+        request &&
+          'rounded border border-[var(--shift-sample-color,transparent)] font-medium opacity-[0.95] shadow-sm',
+        request && 'hover:z-[2] hover:scale-[1.02] hover:opacity-100 hover:shadow-md',
+        // Denied: dashed border, muted
+        request && request.status === RequestStatus.DENIED && 'border-dashed opacity-60',
+        // Past empty
+        isPastEmpty && 'cursor-not-allowed !bg-muted/50 opacity-50',
+        // Clickable empty
+        !request && (canAddRequest || canEditRequest) && 'group cursor-pointer',
+        // Clickable request
+        request && (canAddRequest || canEditRequest) && 'cursor-pointer',
+      )}
       style={
         {
           ...(shiftColors && {
@@ -253,8 +260,9 @@ function RequestCalendarCell({
             '--shift-sample-color': shiftColors.sample,
             '--shift-text-color': shiftColors.text,
             background: shiftColors.background,
+            color: shiftColors.text,
           }),
-          cursor: canAddRequest || canEditRequest ? 'pointer' : 'default',
+          ...getStatusStyle(),
         } as React.CSSProperties
       }
       data-testid={`calendar-cell-${worker.id}-${date.format('YYYY-MM-DD')}${
@@ -265,7 +273,17 @@ function RequestCalendarCell({
       onClick={handleClick}
       title={getTitle()}
     >
-      {request && requestEmojis && <div className="calendar-cell__emojis">{requestEmojis}</div>}
+      {/* Add button for clickable empty cells — inset so it has room from the cell border */}
+      {!request && (canAddRequest || canEditRequest) && (
+        <div className="absolute inset-1 flex items-center justify-center rounded border border-dashed border-primary/50 bg-primary/[0.08] opacity-0 transition-opacity group-hover:opacity-100">
+          <span className="text-xs leading-none font-bold text-primary/70">+</span>
+        </div>
+      )}
+      {request && requestEmojis && (
+        <div className="z-[1] flex items-center justify-center gap-0.5 text-base text-xs leading-none">
+          {requestEmojis}
+        </div>
+      )}
     </div>
   );
 }
@@ -284,86 +302,47 @@ function RequestCalendarRow({
   onRequestClick,
 }: RequestCalendarRowProps) {
   return (
-    <div className="calendar-row" key={worker.id}>
-      <div className="calendar-row__name" title={worker.name}>
-        {worker.name}
-      </div>
-      <div className="calendar-row__days">
-        {days.map((d) => {
-          const request = getRequestForDay(worker.id, d);
-          const isEmpty = !request;
-          const isPast = d.isBefore(dayjs().utc(), 'day');
-          const canAddRequest =
-            isEmpty && !isPast && !worker.deleted && !!handleAddRequest && !!lng && !!teamId;
-          const canEditRequest = !!request && !!handleUpdateRequest && !!lng && !!teamId;
+    <div
+      className="min-h-[40px] border-b border-border/50"
+      style={{
+        display: 'grid',
+        gridTemplateColumns: calendarGridTemplate(days.length),
+      }}
+    >
+      {/* Sticky worker name column */}
+      <CalendarRowHeaderCell>
+        <span
+          className="py-2 text-sm font-medium break-words whitespace-normal text-foreground"
+          title={worker.name}
+        >
+          {worker.name}
+        </span>
+      </CalendarRowHeaderCell>
+      {/* Day cells — direct grid children */}
+      {days.map((d) => {
+        const request = getRequestForDay(worker.id, d);
+        const isEmpty = !request;
+        const isPast = d.isBefore(dayjs().utc(), 'day');
+        const canAddRequest =
+          isEmpty && !isPast && !worker.deleted && !!handleAddRequest && !!lng && !!teamId;
+        const canEditRequest = !!request && !!handleUpdateRequest && !!lng && !!teamId;
 
-          return (
-            <RequestCalendarCell
-              key={d.date()}
-              worker={worker}
-              date={d}
-              request={request}
-              shifts={shifts}
-              canAddRequest={canAddRequest}
-              canEditRequest={canEditRequest}
-              isPast={isPast}
-              isEmpty={isEmpty}
-              onCellClick={onCellClick}
-              onRequestClick={onRequestClick}
-            />
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-// Header component
-function RequestCalendarHeader({
-  lng,
-  days,
-  currentSort,
-  currentFilter,
-  onSort,
-  onFilter,
-  workerColumn,
-}: RequestCalendarHeaderProps) {
-  const { t } = useTranslation(lng || 'en', 'request-page');
-
-  return (
-    <div className="calendar-header">
-      <div className="calendar-header__empty">
-        {/* Filter/Sort menu for workers */}
-        <div className="calendar-header__worker-content">
-          <Typography variant="body2">{t('workers')}</Typography>
-          {workerColumn && onSort && onFilter && (
-            <ColumnSortFilterMenu
-              column={workerColumn}
-              currentSort={currentSort}
-              currentFilter={currentFilter}
-              onSort={onSort}
-              onFilter={onFilter}
-            />
-          )}
-        </div>
-      </div>
-      <div className="calendar-header__days">
-        {days.map((d) => {
-          const isWeekend = d.day() === 0 || d.day() === 6;
-          return (
-            <div
-              key={d.date()}
-              className={`calendar-header__day${isWeekend ? 'weekend' : ''}`}
-              data-testid={`date-header-${d.format('YYYY-MM-DD')}`}
-            >
-              <div className="calendar-header__day-number">{d.date()}</div>
-              <div className="calendar-header__day-week">
-                {daysOfWeek[d.day() === 0 ? 6 : d.day() - 1]}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+        return (
+          <RequestCalendarCell
+            key={d.date()}
+            worker={worker}
+            date={d}
+            request={request}
+            shifts={shifts}
+            canAddRequest={canAddRequest}
+            canEditRequest={canEditRequest}
+            isPast={isPast}
+            isEmpty={isEmpty}
+            onCellClick={onCellClick}
+            onRequestClick={onRequestClick}
+          />
+        );
+      })}
     </div>
   );
 }
@@ -382,7 +361,7 @@ function RequestCalendarBody({
   onRequestClick,
 }: RequestCalendarBodyProps) {
   return (
-    <div className="calendar-body">
+    <div className="flex flex-col bg-card">
       {workers.map((worker) => (
         <RequestCalendarRow
           key={worker.id}
@@ -402,97 +381,108 @@ function RequestCalendarBody({
   );
 }
 
+// Shared cell class for summary rows — grid track handles sizing
+const summaryCellClass =
+  'min-h-[40px] flex items-center justify-center border-r border-border/50 text-sm font-semibold';
+
+// Shared row label class for summary rows — sticky left-0 works in CSS grid
+const summaryLabelClass =
+  'flex items-center px-3 py-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground bg-muted/50 border-r border-border/80 sticky left-0 z-[2]';
+
 // Staffing summary rows component
 function StaffingSummaryRows({ days, staffingSummary, isCalculating }: StaffingSummaryRowsProps) {
   if (isCalculating || !staffingSummary) {
     return <StaffingSummaryLoadingIndicator days={days} />;
   }
 
+  const summaryRows: Array<{
+    key: 'demand' | 'available' | 'delta';
+    label: string;
+  }> = [
+    { key: 'demand', label: 'Demand' },
+    { key: 'available', label: 'Offer' },
+    { key: 'delta', label: 'Delta' },
+  ];
+
   return (
     <>
-      {/* Program staffing requirement */}
-      <div className="calendar-row">
-        <div className="calendar-row__name" style={{ fontWeight: 600 }} title="Demand">
-          Demand
-        </div>
-        <div className="calendar-row__days">
+      {summaryRows.map(({ key, label }) => (
+        <div
+          key={key}
+          className="min-h-[40px] border-b border-border/50"
+          style={{
+            display: 'grid',
+            gridTemplateColumns: calendarGridTemplate(days.length),
+          }}
+        >
+          <div className={summaryLabelClass} title={label}>
+            {label}
+          </div>
           {days.map((d) => {
             const dateKey = d.format('YYYY-MM-DD');
-            const summary = staffingSummary[dateKey] || {
-              demand: 0,
-              available: 0,
-              delta: 0,
-            };
+            const summary = staffingSummary[dateKey] || { demand: 0, available: 0, delta: 0 };
+            const value = summary[key];
+            const isWeekBoundary = d.isoWeekday() === 1;
+
+            // Delta-specific colour coding
+            let deltaClass = '';
+            if (key === 'delta') {
+              deltaClass =
+                value < 0
+                  ? 'bg-red-50 text-red-700 dark:bg-red-950 dark:text-red-300'
+                  : 'bg-green-50 text-green-800 dark:bg-green-950 dark:text-green-300';
+            }
+
             return (
               <div
                 key={dateKey}
-                className="calendar-cell"
-                style={{
-                  fontWeight: 600,
-                }}
+                className={cn(
+                  summaryCellClass,
+                  isWeekBoundary && 'border-l-2 border-l-border',
+                  deltaClass,
+                )}
               >
-                {summary.demand}
+                {value}
               </div>
             );
           })}
         </div>
-      </div>
-      {/* Current staff available */}
-      <div className="calendar-row">
-        <div className="calendar-row__name" style={{ fontWeight: 600 }} title="Offer">
-          Offer
-        </div>
-        <div className="calendar-row__days">
-          {days.map((d) => {
-            const dateKey = d.format('YYYY-MM-DD');
-            const summary = staffingSummary[dateKey] || {
-              demand: 0,
-              available: 0,
-              delta: 0,
-            };
-            return (
-              <div
-                key={dateKey}
-                className="calendar-cell"
-                style={{
-                  fontWeight: 600,
-                }}
-              >
-                {summary.available}
-              </div>
-            );
-          })}
-        </div>
-      </div>
-      {/* Delta */}
-      <div className="calendar-row">
-        <div className="calendar-row__name" style={{ fontWeight: 600 }} title="Delta">
-          Delta
-        </div>
-        <div className="calendar-row__days">
-          {days.map((d) => {
-            const dateKey = d.format('YYYY-MM-DD');
-            const summary = staffingSummary[dateKey] || {
-              demand: 0,
-              available: 0,
-              delta: 0,
-            };
-            const delta = summary.delta;
-            const isNegative = delta < 0;
-            return (
-              <div
-                key={dateKey}
-                className={`calendar-cell calendar-cell--delta${
-                  isNegative ? 'calendar-cell--delta-negative' : 'calendar-cell--delta-positive'
-                }`}
-              >
-                {delta}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      ))}
     </>
+  );
+}
+
+// Thin wrapper so the shared CalendarTableHeader can read the 'workers' i18n label
+// from this page's namespace without leaking request-page concerns into the shared component.
+function CalendarTableHeaderWithWorkerLabel({
+  lng,
+  days,
+  workerColumn,
+  currentSort,
+  currentFilter,
+  onSort,
+  onFilter,
+}: {
+  lng?: string;
+  days: Dayjs[];
+  workerColumn?: ColumnDefinition;
+  currentSort?: TableSort;
+  currentFilter?: ColumnFilter;
+  onSort?: (sort: TableSort | null) => void;
+  onFilter?: (filter: ColumnFilter) => void;
+}) {
+  const { t } = useTranslation(lng || 'en', 'request-page');
+  return (
+    <CalendarTableHeader
+      lng={lng}
+      days={days}
+      rowHeaderLabel={t('workers')}
+      rowColumn={workerColumn}
+      currentSort={currentSort}
+      currentFilter={currentFilter}
+      onSort={onSort}
+      onFilter={onFilter}
+    />
   );
 }
 
@@ -517,9 +507,16 @@ export default function RequestCalendarTable({
   workerColumn,
 }: RequestCalendarTableProps) {
   return (
-    <div className="request-calendar-table">
+    <div
+      className={cn(
+        'relative w-full overflow-auto rounded border border-border/50',
+        'h-[calc(100vh-185px)]',
+        // Scrollbar styling via arbitrary variants isn't possible in Tailwind v3 standard,
+        // but the browser default scrollbar is fine here.
+      )}
+    >
       {/* Calendar Header */}
-      <RequestCalendarHeader
+      <CalendarTableHeaderWithWorkerLabel
         lng={lng}
         days={days}
         currentSort={currentSort}

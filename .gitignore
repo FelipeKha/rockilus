@@ -35,12 +35,14 @@ __pycache__/
 .next/
 node_modules/
 dist/
+cognito-local-data/
 backend/src/processing_engine/engine/saved/
 backend/processing_engine/src/solver_parameter_tuning/parameter_test_output
 backend/processing_engine/src/solver_parameter_tuning/analysis_output
 backend/solve_service/src/engine/saved/
 backend/solve_service/src/solver_parameter_tuning/parameter_test_output
 backend/solve_service/src/solver_parameter_tuning/analysis_output
+
 
 # Environments
 venv_nsp
@@ -91,3 +93,6 @@ rockilus-web/yarn-error.log*
 rockilus-web/.pnpm-debug.log*
 rockilus-web/.vercel
 rockilus-web/*.tsbuildinfo
+
+# Security scanning artifacts
+security-reports/
