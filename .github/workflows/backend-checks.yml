@@ -84,7 +84,7 @@ jobs:
         working-directory: backend/api_gateway
 
       - name: "Security: pip-audit (api_gateway)"
-        run: uv run pip-audit
+        run: uv run pip-audit --vulnerability-service osv
         working-directory: backend/api_gateway
 
       - name: "Security: bandit (api_gateway)"
